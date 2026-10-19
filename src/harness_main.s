@@ -32,9 +32,9 @@ z80_bad_jump:
 .halt	bra.s	.halt
 
 plat_irq:				; level 3 autovector, raised by the harness
-	movem.l	d0-d7/a0-a4/a6,-(sp)	; a5 (cycle counter) keeps counting
+	movem.l	d0-d7/a0/a2-a4/a6,-(sp)	; not a5 (cycle counter) or a1 (bank: global)
 	bsr	rt_irq_body
-	movem.l	(sp)+,d0-d7/a0-a4/a6
+	movem.l	(sp)+,d0-d7/a0/a2-a4/a6
 	rte
 
 	include	"game.s"

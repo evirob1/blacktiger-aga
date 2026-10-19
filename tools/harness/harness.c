@@ -101,6 +101,15 @@ static void compare(int vbl)
     if (frames_ok >= max_frames) stop(0);
 }
 
+/* BT_PROFILE: 68k cycles spent on game work per frame (not the idle loop and
+   not the test build's nop/lea instrumentation) */
+static int profile;
+static unsigned long long work_cyc;
+static unsigned int idle_lo, idle_hi;
+static unsigned int work_hist[100000];
+static int work_n;
+static unsigned int pc_cyc[1 << 22];     /* BT_PROFILE: work cycles per 68k address */
+
 /* called by Musashi before every instruction */
 void harness_hook(unsigned int pc)
 {
@@ -117,10 +126,34 @@ void harness_hook(unsigned int pc)
         next_irq += FRAME_T;
         armed = 0;
         irqs++;
+        if (profile && work_n < 100000) { work_hist[work_n++] = (unsigned int)work_cyc; work_cyc = 0; }
         if (getenv("BT_TRACE_IRQ")) printf("irq at T=%u pc=%06x\n", t, pc - BASE);
         m68k_set_irq(3);
         m68k_end_timeslice();          /* Musashi takes interrupts between slices */
     }
+}
+
+/* the Z80 image's $8000-$BFFF is never filled (bank reads go through a1):
+   reading it means a bank-read site is missing from data/bank_reads.txt.
+   The harness answers with the right bank data, notes the 68k address
+   (STALE lines, see tools/harness/stale_sites.py) and fails at the end. */
+static unsigned int banks_off;
+static int stale_reads;
+static unsigned int stale_pcs[4096];
+static int stale_n;
+
+static int stale_fix(unsigned int a, unsigned int *v, int size)
+{
+    unsigned int w = BASE + z80mem_off;
+    if (a < w || a >= w + 0x4000) return 0;
+    unsigned int pc = m68k_get_reg(NULL, M68K_REG_PPC) - BASE;
+    int k;
+    for (k = 0; k < stale_n && stale_pcs[k] != pc; k++) ;
+    if (k == stale_n && stale_n < 4096) stale_pcs[stale_n++] = pc;
+    stale_reads++;
+    unsigned int src = BASE + banks_off + mem[BASE + vars_off] * 0x4000 + (a - w);
+    *v = size == 1 ? rd8(src) : size == 2 ? rd16(src) : rd32(src);
+    return 1;
 }
 
 unsigned int m68k_read_memory_8(unsigned int a)
@@ -137,10 +170,12 @@ unsigned int m68k_read_memory_8(unsigned int a)
         if (qv[port][i]) compare(qv[port][i]);
         return q[port][i];
     }
+    unsigned int v;
+    if (stale_fix(a, &v, 1)) return v;
     return rd8(a);
 }
-unsigned int m68k_read_memory_16(unsigned int a) { return rd16(a); }
-unsigned int m68k_read_memory_32(unsigned int a) { return rd32(a); }
+unsigned int m68k_read_memory_16(unsigned int a) { unsigned int v; return stale_fix(a, &v, 2) ? v : rd16(a); }
+unsigned int m68k_read_memory_32(unsigned int a) { unsigned int v; return stale_fix(a, &v, 4) ? v : rd32(a); }
 unsigned int m68k_read_disassembler_16(unsigned int a) { return rd16(a); }
 unsigned int m68k_read_disassembler_32(unsigned int a) { return rd32(a); }
 
@@ -190,6 +225,7 @@ int main(int argc, char **argv)
     vars_off = rd32(BASE + 16);
     irq_off = rd32(BASE + 20);
     irq_handler = BASE + irq_off;
+    banks_off = rd32(BASE + 32);
 
     f = fopen(argv[2], "r");
     if (!f) { perror(argv[2]); return 1; }
@@ -229,7 +265,46 @@ int main(int argc, char **argv)
     m68k_pulse_reset();
     m68k_set_reg(M68K_REG_SR, 0x2000);
     unsigned long long cycles = 0;
-    while (!done) cycles += m68k_execute(1000000);
+    profile = getenv("BT_PROFILE") != NULL;
+    idle_lo = BASE + rd32(BASE + 24);
+    idle_hi = BASE + rd32(BASE + 28);
+    while (!done) {
+        if (profile) {
+            /* one instruction at a time: m68k_execute returns its exact cycles */
+            unsigned int pc = m68k_get_reg(NULL, M68K_REG_PC);
+            unsigned int op = rd16(pc);
+            int c = m68k_execute(1);
+            cycles += c;
+            int instr = op == 0x4e71 || op == 0x4bed;      /* test build's nop / lea d16(a5),a5 */
+            int idle = pc >= idle_lo && pc < idle_hi;
+            if (!instr && !idle) {
+                work_cyc += c;
+                if (pc - BASE < (1 << 22)) pc_cyc[pc - BASE] += c;
+            }
+        } else
+            cycles += m68k_execute(1000000);
+    }
+    if (profile && work_n > 1) {
+        /* frame 0 is the reset code */
+        unsigned int *h = work_hist + 1;
+        int n = work_n - 1;
+        unsigned long long sum = 0;
+        for (int i = 0; i < n; i++) sum += h[i];
+        for (int i = 1; i < n; i++)
+            for (int j = i; j > 0 && h[j - 1] > h[j]; j--) { unsigned int x = h[j]; h[j] = h[j - 1]; h[j - 1] = x; }
+        printf("game work per frame (68k cycles, Musashi 68020 timing): mean %llu  median %u  p90 %u  p99 %u  max %u\n",
+               sum / n, h[n / 2], h[n * 9 / 10], h[n * 99 / 100], h[n - 1]);
+        FILE *pf = fopen("build/profile.txt", "w");
+        for (unsigned int i = 0; i < (1 << 22); i++)
+            if (pc_cyc[i]) fprintf(pf, "%x %u\n", i, pc_cyc[i]);
+        fclose(pf);
+    }
+    if (stale_n) {
+        printf("%d reads of the unfilled bank window from %d places (data/bank_reads.txt is incomplete):\n",
+               stale_reads, stale_n);
+        for (int k = 0; k < stale_n; k++) printf("STALE %x\n", stale_pcs[k]);
+        failed = 1;
+    }
     unsigned int t = m68k_get_reg(NULL, M68K_REG_A5);
     printf("%d vblanks matched MAME exactly; %llu interrupts; %.0f Z80 T-states/frame, "
            "%.0f 68k cycles/frame (Musashi's count, no wait states)\n",

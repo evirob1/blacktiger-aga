@@ -76,8 +76,9 @@ class T:
 
 
 class Translator:
-    def __init__(self, rom, cm, out, cycles=False):
+    def __init__(self, rom, cm, out, cycles=False, bank_sites=()):
         self.rom, self.cm, self.out = rom, cm, out
+        self.bank_sites = set(bank_sites)
         self.cycles = cycles      # test build: count Z80 T-states in a5, mark boundaries
         self.uid = 0
         self.problems = []
@@ -89,8 +90,10 @@ class Translator:
         self.uid += 1
         return "_t%d" % self.uid
 
-    def mem(self, op):
-        """Memory operand text for (hl), (bc), (de), (ix+d), (iy+d), ($nnnn)."""
+    def mem(self, op, read=False):
+        """Memory operand text for (hl), (bc), (de), (ix+d), (iy+d), ($nnnn).
+        A read from a fixed address in the banked window $8000-$BFFF goes
+        through a1 (current bank); everything else through a6."""
         inner = op[1:-1]
         if inner in ("hl", "bc", "de"):
             return "(a6,%s.w)" % PAIR[inner]
@@ -98,7 +101,8 @@ class Translator:
         if m:
             return "(%d,a6,%s.w)" % (int(m.group(2)), PAIR[m.group(1)])
         if inner.startswith("$"):
-            return "(%d,a6)" % sext16(int(inner[1:], 16))
+            a = int(inner[1:], 16)
+            return "(%d,%s)" % (sext16(a), "a1" if read and 0x8000 <= a < 0xC000 else "a6")
         raise ValueError(op)
 
     def is_mem(self, op):
@@ -109,7 +113,7 @@ class Translator:
         if op.startswith("$"):
             return [], "#$%s" % op[1:]
         if self.is_mem(op):
-            return [], self.mem(op)
+            return [], self.mem(op, read=True)
         reg, high = R8[op]
         if high:
             return ["move.w %s,%s" % (reg, into), "lsr.w #8,%s" % into], into
@@ -139,6 +143,33 @@ class Translator:
             return ["ror.w #8,%s" % reg] + body(reg) + ["move.w ccr,d7", "rol.w #8,%s" % reg,
                                                         "move.w d7,ccr"], False
         return body(reg), False
+
+    def select_base(self, reg):
+        """a0 = a1 (current bank) if the Z80 address in reg is in $8000-$BFFF,
+        else a6. Keeps the CCR."""
+        s = self.tmp()
+        return ["move.w ccr,-(sp)", "movea.w %s,a0" % reg, "cmpa.w #-$4000,a0", "movea.l a6,a0",
+                "bge.s %s" % s, "movea.l a1,a0", s + ":", "move.w (sp)+,ccr"]
+
+    def bank_aware(self, key, ins, t):
+        """An instruction seen reading the bank window through a register:
+        choose the base at run time."""
+        op = ins.text.split(" ")[0]
+        if op not in ("ld", "add", "adc", "sub", "sbc", "and", "xor", "or", "cp", "bit"):
+            self.problems.append("%s: bank read by '%s' not handled" % (label(*key), ins.text))
+            return t
+        if op == "ld" and not ins.text.split(",", 1)[1].startswith("("):
+            self.problems.append("%s: bank read site is a store? (%s)" % (label(*key), ins.text))
+            return t
+        for i, l in enumerate(t.lines):
+            m = re.search(r"\((-?\d+,)?a6,(d\d)\.w\)", l)
+            if m:
+                new = l[:m.start()] + "(%sa0,%s.w)" % (m.group(1) or "", m.group(2)) + l[m.end():]
+                t.lines = t.lines[:i] + self.select_base(m.group(2)) + [new] + t.lines[i + 1:]
+                t.stack = True
+                return t
+        self.problems.append("%s: no indexed operand to make bank-aware (%s)" % (label(*key), ins.text))
+        return t
 
     def c_to_x(self):
         return ["scs d6", "add.b d6,d6"]     # X := C
@@ -221,7 +252,8 @@ class Translator:
             if d in PAIR and not self.is_mem(s) and s.startswith("$"):
                 return T(["move.w #%s,%s" % (s, PAIR[d])], clob=CCR_MOVE)
             if d in PAIR and self.is_mem(s):      # ld rr,(nn)
-                return T(["move.w %s,%s" % (self.mem(s), PAIR[d]), "rol.w #8,%s" % PAIR[d]])
+                return T(["move.w %s,%s" % (self.mem(s, read=True), PAIR[d]),
+                          "rol.w #8,%s" % PAIR[d]])
             if s in PAIR and self.is_mem(d):      # ld (nn),rr
                 r = PAIR[s]
                 return T(["ror.w #8,%s" % r, "move.w %s,%s" % (r, self.mem(d)), "rol.w #8,%s" % r])
@@ -273,7 +305,9 @@ class Translator:
                 return T(["move.w (sp),d7", "move.w %s,(sp)" % r, "move.w d7,%s" % r],
                          clob=CCR_MOVE, stack=True)
         if op == "exx":
-            return T(["exg d1,a1", "exg d2,a2", "exg d3,a3"], clob=0)
+            # BC' lives in memory (a1 is the bank pointer); movem/exg leave the flags alone
+            return T(["movem.w RT_ALT_BC(a4),d6", "movem.w d1,RT_ALT_BC(a4)", "exg d6,d1",
+                      "exg d2,a2", "exg d3,a3"], clob=0, d6=True)
         if op in ("inc", "dec") and args[0] in PAIR:
             return T(["%s.w #1,%s" % ("addq" if op == "inc" else "subq", PAIR[args[0]])])
         if op == "inc" and args[0] == "sp" or op == "dec" and args[0] == "sp":
@@ -363,12 +397,13 @@ class Translator:
         if op in ("ldir", "lddr"):
             s = self.tmp()
             q = "addq" if op == "ldir" else "subq"
-            return T([s + ":", "move.b (a6,d3.w),(a6,d2.w)", "%s.w #1,d3" % q, "%s.w #1,d2" % q,
-                      "subq.w #1,d1", "bne.s %s" % s], defs=V, ok=0)
+            return T(self.select_base("d3") + [s + ":", "move.b (a0,d3.w),(a6,d2.w)",
+                      "%s.w #1,d3" % q, "%s.w #1,d2" % q, "subq.w #1,d1", "bne.s %s" % s],
+                     defs=V, ok=0)
         if op in ("ldi", "ldd"):
             q = "addq" if op == "ldi" else "subq"
-            return T(["move.b (a6,d3.w),(a6,d2.w)", "%s.w #1,d3" % q, "%s.w #1,d2" % q,
-                      "subq.w #1,d1"], defs=V, ok=0)
+            return T(self.select_base("d3") + ["move.b (a0,d3.w),(a6,d2.w)", "%s.w #1,d3" % q,
+                      "%s.w #1,d2" % q, "subq.w #1,d1"], defs=V, ok=0)
         if op in ("cpir", "cpdr", "cpi", "cpd", "ini", "ind", "inir", "indr", "outi", "outd",
                   "otir", "otdr", "rld", "rrd"):
             return T(["bsr z80_%s" % op], use=C, defs=ALL, ok=ALL if op in ("rld", "rrd") else Z | C,
@@ -428,6 +463,8 @@ class Translator:
                 trs[key] = self.tr_daa(key[0], ins)
             else:
                 trs[key] = self.tr(key[0], ins, None)
+                if key in self.bank_sites and ins.text not in ("ldir", "lddr", "ldi", "ldd"):
+                    trs[key] = self.bank_aware(key, ins, trs[key])
         daa_keys = set(fused.values())
         for k in daa_keys:
             trs[k] = T(["; daa (fused with the add/sub above)"], clob=0)
@@ -535,8 +572,8 @@ class Translator:
         if op in ("ldir", "lddr"):
             # 21 T-states per byte, 16 for the last. Each byte is a separate
             # instruction execution on the Z80, so interrupts can come in between.
-            top = next(i for i, l in enumerate(lines) if re.match(r"_t\d+:$", l))
-            bne = next(i for i, l in enumerate(lines) if l == "bne.s %s" % lines[top][:-1])
+            bne = next(i for i, l in enumerate(lines) if re.match(r"bne\.s _t\d+$", l))
+            top = lines.index(lines[bne].split()[1] + ":")
             s = self.tmp()
             lines = (lines[:top + 1] + ["lea 21(a5),a5"] + lines[top + 1:bne] +
                      ["beq.s %s" % s, "nop", "bra.s %s" % lines[top][:-1], s + ":",
@@ -613,7 +650,14 @@ def main():
     cycles = "--cycles" in sys.argv
     args = [a for a in sys.argv if a != "--cycles"]
     sys.argv = args
-    tr = Translator(rom, cm, sys.argv[3], cycles)
+    sites = []
+    bank_file = os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])), "bank_reads.txt")
+    if os.path.exists(bank_file):
+        for line in open(bank_file):
+            f = line.split()
+            if f and not line.startswith("#"):
+                sites.append((None if f[0] == "ff" else int(f[0], 16), int(f[1], 16)))
+    tr = Translator(rom, cm, sys.argv[3], cycles, sites)
     tr.run()
     rep = sys.argv[4] if len(sys.argv) > 4 else None
     probs = sorted(set(tr.problems))

@@ -11,8 +11,11 @@
 ;
 ; Register use while Z80 code runs (docs/TRANSLATOR.md):
 ;   d0 = A, d1 = BC, d2 = DE, d3 = HL, d4 = IX, d5 = IY, d6/d7/a0 scratch,
-;   a1-a3 = BC'/DE'/HL', a4 = runtime variables, a5 = Z80 cycle counter (test
-;   build only), a6 = Z80 memory + $8000 (halves swapped: (a6,Rn.w) addressing).
+;   a1 = current ROM bank + $8000 (reads of $8000-$BFFF data: (a1,Rn.w)),
+;   a2/a3 = DE'/HL' (BC' is a variable), a4 = runtime variables, a5 = Z80
+;   cycle counter (test build only), a6 = Z80 memory + $8000 (halves swapped:
+;   (a6,Rn.w) addressing). The banked window of the Z80 image is never filled:
+;   bank switches only move a1.
 ;
 ; The game runs like the arcade board: rt_init runs the reset code, which ends
 ; in the scheduler's endless loop; the vblank interrupt (rt_irq_body, called by
@@ -36,6 +39,8 @@ RT_PENDING	equ	3	; b  interrupt waiting for ei (Amiga)
 RT_ALT_A	equ	4	; b  A'
 RT_ALT_F	equ	6	; w  F' (as a 68k CCR)
 RT_TASK_SP	equ	8	; 16 x l  68k stack of each sleeping task
+RT_ALT_BC	equ	72	; w  BC'
+RT_SIZE		equ	74
 
 ;------------------------------------------------------------------------------
 ; header: entry points and data offsets for the loaders
@@ -46,6 +51,9 @@ rt_header:
 	dc.l	bgram-rt_header		; +12 16K background RAM (all four banks)
 	dc.l	rt_vars-rt_header	; +16 runtime variables
 	dc.l	plat_irq-rt_header	; +20 platform interrupt handler (68k level 3)
+	dc.l	sched_00b6-rt_header	; +24 scheduler idle loop start (profiling)
+	dc.l	sched_00d6-rt_header	; +28 scheduler idle loop end
+	dc.l	z80banks-rt_header	; +32 banked ROM data (16 x 16K)
 
 ;------------------------------------------------------------------------------
 rt_init:
@@ -258,22 +266,17 @@ z80_unknown_bank:
 	bra	z80_bad_jump
 
 ;------------------------------------------------------------------------------
-; ROM bank switch: copy bank d0 (0-15) into Z80 $8000-$BFFF
+; ROM bank switch: point a1 at bank d0 (0-15) so that (a1,Rn.w) reads it
 set_bank:
-	movem.l	d0/d7/a0-a1,-(sp)
-	and.w	#$0f,d0
-	move.b	d0,RT_BANK(a4)
-	moveq	#0,d7
-	move.b	d0,d7
-	moveq	#14,d0
-	lsl.l	d0,d7			; * $4000
-	lea	z80banks(pc),a0
-	add.l	d7,a0
-	lea	(Z8000,a6),a1
-	move.w	#$4000/4-1,d7
-.c	move.l	(a0)+,(a1)+
-	dbf	d7,.c
-	movem.l	(sp)+,d0/d7/a0-a1
+	move.l	d7,-(sp)
+	moveq	#$0f,d7
+	and.b	d0,d7
+	move.b	d7,RT_BANK(a4)
+	lsl.l	#8,d7
+	lsl.l	#6,d7			; * $4000
+	lea	z80banks+$8000(pc),a1
+	add.l	d7,a1
+	move.l	(sp)+,d7
 	rts
 
 ; background RAM bank: the Z80 sees one 4K bank of 16K at $C000
@@ -357,7 +360,7 @@ io_out_0d:				; background RAM bank
 
 ;------------------------------------------------------------------------------
 	cnop	0,4
-rt_vars:	ds.b	RT_TASK_SP+16*4
+rt_vars:	ds.b	RT_SIZE
 	cnop	0,4
 		ds.b	1024
 sched_stack_top:

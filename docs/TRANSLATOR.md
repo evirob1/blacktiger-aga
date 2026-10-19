@@ -63,9 +63,13 @@ Swapping the halves means a Z80 address held in a register works directly
 as a signed 16-bit index: `ld a,(hl)` → `move.b (a6,d3.w),d0`.
 
 **Banked ROM.** Code in `$8000`–`$BFFF` is translated per bank, and labels
-carry the bank (`b6_8c76`). Data reads from the banked window go to the
-memory copy, which the bank switch refreshes (16K copy, or pointer swap when
-reads are only through known routines).
+carry the bank (`b6_8c76`). The game switches banks up to ~26 times a frame,
+so a switch only moves `a1` to the bank's data. Reads of banked data use it:
+fixed addresses in `$8000`–`$BFFF` statically, block moves by checking their
+source once, and the instructions listed in `data/bank_reads.txt` (recorded
+in MAME by `tools/mame/bank_reads.sh`) by checking their pointer at run time.
+The test harness leaves the Z80 image's bank window unfilled and reports any
+other read of it, so a missing site can't go unnoticed in testing.
 
 **Video RAM** (`$C000`–`$FFFF`) is plain memory. The runtime diffs it each
 frame against a shadow copy to find changed tiles, characters and colours.
@@ -139,3 +143,15 @@ build/harness build/harness_game.bin analysis/rec/io.txt analysis/rec/ram.bin
 
 **Status:** a 3,000-frame recording (attract mode, coin, start, random play)
 matches MAME byte for byte at every frame.
+
+## Speed
+
+`BT_PROFILE=1 build/harness ...` counts 68k cycles spent on game work (not the
+idle loop, not the test instrumentation) per frame, using Musashi's 68020
+timings (no chip RAM wait states), and writes `build/profile.txt`.
+
+Over the 3,000-frame recording: mean 18,500, median 3,300, 90th percentile
+54,000, 99th 110,000, worst 219,000 cycles per frame. A PAL frame on a 14 MHz
+68020 is ~283,000 cycles, so the game logic should leave most of the frame for
+rendering even with chip RAM wait states. Biggest remaining costs: background
+RAM bank switching (21%, 2 × 4K copy) and the computed-jump lookup (5%).
