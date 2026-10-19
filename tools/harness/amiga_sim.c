@@ -44,9 +44,25 @@ static unsigned int custom_read(unsigned int reg)
     }
 }
 
+/* reads of the Z80 image's unfilled bank window: a bank-read site missing
+   from data/bank_reads.txt (printed as STALE <68k offset>, once each) */
+static unsigned int stale_seen[4096];
+static int stale_n;
+static void stale_check(unsigned int a)
+{
+    if (!z80mem_off) return;
+    unsigned int w = BASE + z80mem_off;
+    if (a < w || a >= w + 0x4000) return;
+    unsigned int pc = m68k_get_reg(NULL, M68K_REG_PPC) - BASE;
+    for (int i = 0; i < stale_n; i++) if (stale_seen[i] == pc) return;
+    if (stale_n < 4096) stale_seen[stale_n++] = pc;
+    printf("STALE %x\n", pc);
+}
+
 unsigned int m68k_read_memory_8(unsigned int a)
 {
     a &= 0xffffff;
+    stale_check(a);
     if (a >= 0xdff000 && a < 0xdff200) return (a & 1) ? custom_read(a) & 0xff : custom_read(a) >> 8;
     if (a >= 0xbfd000 && a < 0xbff000) return 0xff;
     return rd8(a);
@@ -54,6 +70,7 @@ unsigned int m68k_read_memory_8(unsigned int a)
 unsigned int m68k_read_memory_16(unsigned int a)
 {
     a &= 0xffffff;
+    stale_check(a);
     if (a >= 0xdff000 && a < 0xdff200) return custom_read(a);
     return rd16(a);
 }
@@ -240,6 +257,20 @@ int main(int argc, char **argv)
             unsigned int e003 = mem[z80(0xe003)];
             z80_frames += (e003 - last_e003) & 0xff;
             last_e003 = e003;
+            /* BT_KEYS="frame:key,frame:-key,...": Amiga raw key codes (hex) pressed/released */
+            if (getenv("BT_KEYS") && getenv("BT_PVKEYS")) {
+                unsigned int keys = BASE + (unsigned int)strtoul(getenv("BT_PVKEYS"), NULL, 16);
+                char *p = getenv("BT_KEYS");
+                while (*p) {
+                    int f = (int)strtol(p, &p, 10);
+                    if (*p == ':') p++;
+                    int up = *p == '-';
+                    if (up) p++;
+                    int k = (int)strtol(p, &p, 16);
+                    if (f == frame) mem[keys + k] = up ? 0 : 0xff;
+                    if (*p == ',') p++;
+                }
+            }
             if (frame % 50 == 0) {
                 printf("second %d: vblank handler %.0f%% of the CPU, arcade frames this second %u, PC %06x\n",
                        frame / 50, 100.0 * in_lev3 / (50.0 * FRAME), z80_frames,

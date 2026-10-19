@@ -7,6 +7,7 @@ Writes into OUTDIR:
   z80banks.bin   main CPU banked ROM, 16 x 16K
   bgtiles.bin    2048 background tiles, 4 bitplanes, plane-major:
                  4 planes x 16 rows x 1 word = 128 bytes per tile (plane p = pen bit p)
+  sprites.bin    2048 sprites like bgtiles.bin (pen 15 is transparent)
   chars.bin      2048 text characters as sprite data: 8 rows x (plane A byte,
                  plane B byte). Arcade pen 3 is transparent, so pen p is stored
                  as sprite colour (p + 1) & 3.
@@ -35,6 +36,16 @@ def main():
                         w = w << 1 | (px[y * 16 + x] >> plane & 1)
                     f.write(w.to_bytes(2, "big"))
 
+    sprites = bt_rom.decode_16x16(r["sprites"])
+    with open(os.path.join(out, "sprites.bin"), "wb") as f:
+        for px in sprites:
+            for plane in range(4):
+                for y in range(16):
+                    w = 0
+                    for x in range(16):
+                        w = w << 1 | (px[y * 16 + x] >> plane & 1)
+                    f.write(w.to_bytes(2, "big"))
+
     chars = bt_rom.decode_chars(r["chars"])
     with open(os.path.join(out, "chars.bin"), "wb") as f, \
             open(os.path.join(out, "charblank.bin"), "wb") as fb:
@@ -47,7 +58,7 @@ def main():
                     b = b << 1 | (c >> 1)
                 f.write(bytes((a, b)))
             fb.write(bytes((1 if all(p == 3 for p in px) else 0,)))
-    print("graphics: %d tiles, %d characters" % (len(tiles), len(chars)))
+    print("graphics: %d tiles, %d sprites, %d characters" % (len(tiles), len(sprites), len(chars)))
 
 
 if __name__ == "__main__":

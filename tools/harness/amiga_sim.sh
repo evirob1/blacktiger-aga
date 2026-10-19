@@ -14,4 +14,7 @@ export BT_RT_HEADER=$(awk '$1=="rt_header"{sub("[AE]:","",$2); print $2; exit}' 
 export BT_TXSPR=$(awk '$1=="txspr"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst)
 export BT_CHARS=$(awk '$1=="chars"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst)
 export BT_TXSHADOW=$(awk '$1=="txshadow"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst)
+PV=$(awk '$1=="pvars"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst)
+PK=$(awk '$1=="pv_keys"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst)
+export BT_PVKEYS=$(printf "%x" $((0x$PV + 0x$PK)))
 build/amiga_sim build/game/game.bin "$@"

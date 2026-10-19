@@ -1,7 +1,8 @@
 """Add the Z80 instructions behind the harness's STALE lines to data/bank_reads.txt.
 
-usage: build/harness ... | python3 tools/harness/stale_sites.py
-(needs build/harness.lst from tools/harness/run.sh)
+usage: build/harness ... | python3 tools/harness/stale_sites.py [listing]
+(listing: build/harness.lst from tools/harness/run.sh (default), or
+build/game/game.lst for tools/harness/amiga_sim.sh)
 """
 import bisect
 import os
@@ -13,7 +14,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 def main():
     syms = {}
-    for line in open(os.path.join(ROOT, "build", "harness.lst")):
+    lst = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "harness.lst")
+    for line in open(lst):
         m = re.match(r"([zb][0-9a-f]*_[0-9a-f]{4})\s+A:([0-9A-F]{8})", line)
         if m:
             syms[int(m.group(2), 16)] = m.group(1)

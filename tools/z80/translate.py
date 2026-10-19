@@ -148,8 +148,28 @@ class Translator:
         """a0 = a1 (current bank) if the Z80 address in reg is in $8000-$BFFF,
         else a6. Keeps the CCR."""
         s = self.tmp()
-        return ["move.w ccr,-(sp)", "movea.w %s,a0" % reg, "cmpa.w #-$4000,a0", "movea.l a6,a0",
-                "bge.s %s" % s, "movea.l a1,a0", s + ":", "move.w (sp)+,ccr"]
+        return ["movea.w %s,a0" % reg, "cmpa.w #-$4000,a0", "movea.l a6,a0",
+                "bge.s %s" % s, "movea.l a1,a0", s + ":"]
+
+    def static_bank_read(self, key, ins):
+        """Reads that may hit the banked window without being seen in MAME:
+        any pointer read in code that itself lives in a bank (it mostly reads
+        its own bank's tables), and the pointer-table read ld e,(hl) / inc hl /
+        ld d,(hl) anywhere."""
+        t = ins.text
+        reads = re.match(r"(ld [a-z]+,|add a,|adc a,|sub |sbc a,|and |xor |or |cp |bit \d,)"
+                         r"\((hl|de|bc|ix[+-]\d+|iy[+-]\d+)\)$", t)
+        if not reads:
+            return False
+        if key[0] is not None:
+            return True
+        nxt = self.cm.insns.get(codemap.loc(key[0], key[1] + ins.length))
+        prv = self.cm.insns.get(codemap.loc(key[0], key[1] - 1))
+        if t == "ld e,(hl)" and nxt is not None and nxt.text == "inc hl":
+            return True
+        if t == "ld d,(hl)" and prv is not None and prv.text == "inc hl":
+            return True
+        return False
 
     def bank_aware(self, key, ins, t):
         """An instruction seen reading the bank window through a register:
@@ -166,7 +186,7 @@ class Translator:
             if m:
                 new = l[:m.start()] + "(%sa0,%s.w)" % (m.group(1) or "", m.group(2)) + l[m.end():]
                 t.lines = t.lines[:i] + self.select_base(m.group(2)) + [new] + t.lines[i + 1:]
-                t.stack = True
+                t.clob |= CCR_MOVE      # cmpa: the flag analysis saves them where needed
                 return t
         self.problems.append("%s: no indexed operand to make bank-aware (%s)" % (label(*key), ins.text))
         return t
@@ -399,11 +419,11 @@ class Translator:
             q = "addq" if op == "ldir" else "subq"
             return T(self.select_base("d3") + [s + ":", "move.b (a0,d3.w),(a6,d2.w)",
                       "%s.w #1,d3" % q, "%s.w #1,d2" % q, "subq.w #1,d1", "bne.s %s" % s],
-                     defs=V, ok=0)
+                     defs=V, ok=0, clob=ALL)
         if op in ("ldi", "ldd"):
             q = "addq" if op == "ldi" else "subq"
             return T(self.select_base("d3") + ["move.b (a0,d3.w),(a6,d2.w)", "%s.w #1,d3" % q,
-                      "%s.w #1,d2" % q, "subq.w #1,d1"], defs=V, ok=0)
+                      "%s.w #1,d2" % q, "subq.w #1,d1"], defs=V, ok=0, clob=ALL)
         if op in ("cpir", "cpdr", "cpi", "cpd", "ini", "ind", "inir", "indr", "outi", "outd",
                   "otir", "otdr", "rld", "rrd"):
             return T(["bsr z80_%s" % op], use=C, defs=ALL, ok=ALL if op in ("rld", "rrd") else Z | C,
@@ -463,7 +483,8 @@ class Translator:
                 trs[key] = self.tr_daa(key[0], ins)
             else:
                 trs[key] = self.tr(key[0], ins, None)
-                if key in self.bank_sites and ins.text not in ("ldir", "lddr", "ldi", "ldd"):
+                if ins.text not in ("ldir", "lddr", "ldi", "ldd") and (
+                        key in self.bank_sites or self.static_bank_read(key, ins)):
                     trs[key] = self.bank_aware(key, ins, trs[key])
         daa_keys = set(fused.values())
         for k in daa_keys:
