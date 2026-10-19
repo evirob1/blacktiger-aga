@@ -275,7 +275,8 @@ z80_ei:
 z80_bad_jump:
 	move.w	#$2700,sr
 	lea	CUSTOM,a6
-	move.w	#$0080,DMACON(a6)
+	move.w	#$01ff,DMACON(a6)	; all DMA off: just the background colour
+	move.w	#$0000,BPLCON3(a6)
 .red	move.w	#$0f00,COLOR00(a6)
 	bra.s	.red
 

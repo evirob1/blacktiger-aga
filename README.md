@@ -15,11 +15,12 @@ set). Please don't distribute the built disk images.
 | Level maps and palettes extracted straight from ROM (all 8 levels) | done |
 | AGA scrolling engine: 8 bitplanes, 256 colours, 50 fps 2-way scrolling | done, pixel-exact against a reference render |
 | Main game code: Z80 → 68020 translator and runtime | working: 3,000 frames of attract mode and play match MAME byte for byte (see [docs/TRANSLATOR.md](docs/TRANSLATOR.md)) |
-| Translated game on the A1200: background, text layer, palette, joystick, keyboard | working: attract mode and play run at full speed (`build/blacktiger.adf`) |
-| Game sprites (player, enemies, shots), background priority | next |
+| Translated game on the A1200: background, sprites, text layer, palette, joystick, keyboard | working (`build/blacktiger.adf`): game logic at full speed; the display drops to 25 fps on busy screens |
+| Game sprites (player, enemies, shots) | done: blitter objects, double buffered; matches a MAME-style reference render |
+| Background priority (scenery in front of sprites) | next |
+| Code coverage of later levels | in progress: code the recordings never reached stops with a red screen |
 | Sound | planned |
-| Sprites (blitter objects), text layer, priorities | planned |
-| Protection MCU replacement, sound, WHDLoad/HD install | planned |
+| WHDLoad/HD install | planned |
 
 See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and the roadmap.
 
@@ -51,8 +52,11 @@ python tools/build_game.py       -> build/blacktiger.adf
 
 Controls: joystick in port 2 (fire = attack, second button or Space = jump,
 or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
-**2** = 2 players. Not there yet: the game's sprites (so you won't see the
-player or enemies), sound.
+**2** = 2 players. Not there yet: sound, and scenery drawn in front of sprites
+(sprites currently always appear on top).
+
+If the screen turns plain red, the game reached Z80 code the translator
+hasn't seen yet (please report where it happened).
 
 ## Running in WinUAE
 
@@ -78,11 +82,13 @@ tools/test/           FS-UAE screenshot test harness
 tools/z80/            Z80 decoder, code map, timing table and the translator
 src/rt_core.s         runtime for the translated game (scheduler, banks, I/O)
 src/harness_main.s    test build of the translated game
-src/amiga_main.s      the A1200 build: interrupts, inputs, display (background, text, palette)
+src/amiga_main.s      the A1200 build: interrupts, inputs, display (background, sprites, text, palette)
 tools/convert_game.py graphics for the A1200 build
 tools/build_game.py   one-command build of build/blacktiger.adf
 tools/harness/amiga_sim.*     runs the A1200 build on Musashi (speed, memory dumps)
 tools/harness/render_frame.py draws a frame from such a dump, following the copper list
+tools/harness/render_arcade.py draws the same frame the way MAME does, and compares
+tools/lzpack.py       packer for the disk data (unpacked at boot)
 tools/harness/        68k test harness (Musashi) that checks the translation against MAME
 data/code_entries.txt Z80 code addresses seen running in MAME (addresses only)
 ```

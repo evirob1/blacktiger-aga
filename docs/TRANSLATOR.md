@@ -93,6 +93,13 @@ A table ends at the first entry that isn't a code pointer, where it runs into
 code or into one of its own targets. This finds object behaviours the MAME
 recordings never reached (e.g. the 53-entry state table at `$4751`).
 
+Code addresses kept in other data (object scripts and the like) are found the
+same way (`data_pointers`): a word in non-code bytes that points exactly at the
+end of a known unconditional `jp`/`jr`/`ret`, where nothing is known yet (code
+there can't be fallen into, so it is only reached through a pointer), and that
+decodes as plausible code (no `nop`, `halt`, `rst $38` or `ld r,r` in its first
+instructions, which weeds out data records).
+
 ## Indirect jumps
 
 `jp (hl)`, task entry addresses and jump tables use Z80 addresses as data.
@@ -126,6 +133,10 @@ pushed at every instruction:
   vblank interrupt that arrived while interrupts were off (the Z80's interrupt
   line stays asserted until accepted);
 * I/O ports: inputs, sound latch, bank switch, scroll, video enable, MCU (port 7).
+* idle time: when a full scan of the task slots finds nothing to run, the
+  scheduler calls the platform's `PLAT_IDLE`. On the Amiga the display runs
+  there, as a second context that the vblank interrupt parks, so the game
+  always has priority over drawing.
 
 ## Verification
 
