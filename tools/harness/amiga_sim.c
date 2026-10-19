@@ -32,10 +32,15 @@ static unsigned int rd8(unsigned int a) { return mem[a & (MEMSIZE - 1)]; }
 static unsigned int rd16(unsigned int a) { return rd8(a) << 8 | rd8(a + 1); }
 static unsigned int rd32(unsigned int a) { return rd16(a) << 16 | rd16(a + 2); }
 
+/* the blitter takes 1 memory cycle per word per channel used (at least 2),
+   BLIT_CYC 68k cycles each (a colour clock is 4; the rest for display DMA) */
+#define BLIT_CYC 6
+static unsigned long long blit_busy;
+
 static unsigned int custom_read(unsigned int reg)
 {
     switch (reg & 0x1fe) {
-    case 0x002: return 0;                          /* DMACONR: blitter idle */
+    case 0x002: return now + m68k_cycles_run() < blit_busy ? 0x4000 : 0;   /* DMACONR: BBUSY */
     case 0x004: return 0;                          /* VPOSR */
     case 0x006: return (unsigned int)(now / 64) & 0xffff;   /* VHPOSR moves */
     case 0x016: return 0xffff;                     /* POTINP: buttons up */
@@ -78,27 +83,51 @@ unsigned int m68k_read_memory_32(unsigned int a) { return m68k_read_memory_16(a)
 unsigned int m68k_read_disassembler_16(unsigned int a) { return rd16(a); }
 unsigned int m68k_read_disassembler_32(unsigned int a) { return rd32(a); }
 
-/* the two blits the display code uses: A -> D copy ($09F0) and D fill ($0100 / $01FF) */
+/* the blitter (area mode): channels A-D, shifts, first/last word masks, minterm */
 static unsigned int blt[0x100];
 static void blit(void)
 {
-    unsigned int con0 = blt[0x40 / 2];
+    unsigned int con0 = blt[0x40 / 2], con1 = blt[0x42 / 2];
     unsigned int apt = blt[0x50 / 2] << 16 | blt[0x52 / 2];
+    unsigned int bpt = blt[0x4c / 2] << 16 | blt[0x4e / 2];
+    unsigned int cpt = blt[0x48 / 2] << 16 | blt[0x4a / 2];
     unsigned int dpt = blt[0x54 / 2] << 16 | blt[0x56 / 2];
-    int amod = (short)blt[0x64 / 2], dmod = (short)blt[0x66 / 2];
+    int amod = (short)blt[0x64 / 2], bmod = (short)blt[0x62 / 2];
+    int cmod = (short)blt[0x60 / 2], dmod = (short)blt[0x66 / 2];
+    unsigned int afwm = blt[0x44 / 2], alwm = blt[0x46 / 2];
+    unsigned int adat = blt[0x74 / 2], bdat = blt[0x72 / 2], cdat = blt[0x70 / 2];
+    int ash = con0 >> 12, bsh = con1 >> 12, mt = con0 & 0xff;
     unsigned int size = blt[0x58 / 2];
     int h = size >> 6 ? size >> 6 : 1024, w = size & 63 ? size & 63 : 64;
+    unsigned int aold = 0, bold = 0;
+    if (con1 & 1) { printf("line mode blit not emulated\n"); exit(1); }
+    int nch = !!(con0 & 0x800) + !!(con0 & 0x400) + !!(con0 & 0x200) + !!(con0 & 0x100);
+    blit_busy = now + m68k_cycles_run() + (unsigned long long)h * w * (nch < 2 ? 2 : nch) * BLIT_CYC;
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            unsigned int v;
-            if ((con0 & 0x0f00) == 0x0900) { v = rd16(apt); apt += 2; }
-            else v = (con0 & 0xff) ? 0xffff : 0;
-            mem[dpt & 0xffffff] = v >> 8;
-            mem[(dpt + 1) & 0xffffff] = v;
-            dpt += 2;
+            unsigned int a = adat, b = bdat, c = cdat, d = 0;
+            if (con0 & 0x0800) { a = rd16(apt); apt += 2; }
+            if (con0 & 0x0400) { b = rd16(bpt); bpt += 2; }
+            if (con0 & 0x0200) { c = rd16(cpt); cpt += 2; }
+            if (x == 0) a &= afwm;
+            if (x == w - 1) a &= alwm;
+            unsigned int as = ((aold << 16 | a) >> ash) & 0xffff;
+            unsigned int bs = ((bold << 16 | b) >> bsh) & 0xffff;
+            aold = a;
+            bold = b;
+            for (int n = 0; n < 8; n++)
+                if (mt >> n & 1)
+                    d |= (n & 4 ? as : ~as) & (n & 2 ? bs : ~bs) & (n & 1 ? c : ~c);
+            if (con0 & 0x0100) {
+                mem[dpt & 0xffffff] = d >> 8;
+                mem[(dpt + 1) & 0xffffff] = d;
+                dpt += 2;
+            }
         }
-        apt += amod;
-        dpt += dmod;
+        if (con0 & 0x0800) apt += amod;
+        if (con0 & 0x0400) bpt += bmod;
+        if (con0 & 0x0200) cpt += cmod;
+        if (con0 & 0x0100) dpt += dmod;
     }
 }
 
@@ -183,10 +212,11 @@ static void check_text(void)
             int cell = row * 32 + col;
             int attr = mem[z80(0xd400 + cell)];
             int code = mem[z80(0xd000 + cell)] | (attr & 0xe0) << 3;
-            unsigned int spr = txspr + (col >> 3) * (16 + 224 * 16 + 16) + 16 + (row - 2) * 128 + (col & 7);
+            unsigned int spr = txspr + (col >> 3) * 2 * (16 + 224 * 16 + 16) + 16 + (row - 2) * 128 + (col & 7);
+            unsigned int odd = spr + 16 + 224 * 16 + 16;   /* the cell is in one of the pair */
             for (int y = 0; y < 8; y++)
-                if (mem[spr + y * 16] != mem[chars + code * 16 + y * 2] ||
-                    mem[spr + y * 16 + 8] != mem[chars + code * 16 + y * 2 + 1]) {
+                if ((mem[spr + y * 16] | mem[odd + y * 16]) != mem[chars + code * 16 + y * 2] ||
+                    (mem[spr + y * 16 + 8] | mem[odd + y * 16 + 8]) != mem[chars + code * 16 + y * 2 + 1]) {
                     if (bad < 10) printf("  text row %d col %d: char %03x not in the sprite data\n", row, col, code);
                     bad++;
                     break;
@@ -272,9 +302,12 @@ int main(int argc, char **argv)
                 }
             }
             if (frame % 50 == 0) {
-                printf("second %d: vblank handler %.0f%% of the CPU, arcade frames this second %u, PC %06x\n",
+                static unsigned int last_drawn;
+                unsigned int drawn = getenv("BT_DRAWN") ? rd16(BASE + (unsigned int)strtoul(getenv("BT_DRAWN"), NULL, 16)) : 0;
+                printf("second %d: vblank handler %.0f%% of the CPU, arcade frames %u, frames drawn %u, PC %06x\n",
                        frame / 50, 100.0 * in_lev3 / (50.0 * FRAME), z80_frames,
-                       m68k_get_reg(NULL, M68K_REG_PC) - BASE);
+                       (drawn - last_drawn) & 0xffff, m68k_get_reg(NULL, M68K_REG_PC) - BASE);
+                last_drawn = drawn;
                 in_lev3 = 0;
                 z80_frames = 0;
                 if (dumpi < argc && atoi(argv[dumpi]) == frame / 50) {

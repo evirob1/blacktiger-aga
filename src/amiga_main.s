@@ -8,13 +8,21 @@
 ;  * the vblank interrupt runs the Z80 interrupt (or leaves it pending while
 ;    the program has interrupts disabled; z80_ei delivers it)
 ;  * I/O ports: joystick / keyboard / DIP switches / protection MCU answers
-;  * display, rebuilt every vblank from the arcade video RAM:
+;  * display, rebuilt from the arcade video RAM, double buffered, by a second
+;    context that runs whenever the game is idle (its scheduler finds no task
+;    to run) - the game always comes first, the display drops frames if it
+;    has to:
 ;      background  8 bitplanes, tiles drawn from background RAM, hardware scroll;
 ;                  both map layouts (64 x 128 and 128 x 64 tiles)
-;      text layer  4 hardware sprites 64 pixels wide, 2 bitplanes like the
-;                  arcade characters, colours per character row by the copper
-;      palette     all 256 background colours from palette RAM, every frame
-;    Not yet: game sprites, background priority, sound.
+;      sprites     blitter objects drawn over the background (the background
+;                  under them is saved first and put back two frames later)
+;      text layer  8 hardware sprites 64 pixels wide, 2 bitplanes like the
+;                  arcade characters: per 64 pixels of a character row, two
+;                  palettes (even sprite, odd sprite), set by the copper
+;      palette     16 colour slots of 16 (one AGA colour bank each): the arcade
+;                  palettes on screen (background 0-15, sprites 16-23) get a
+;                  slot each, slots 14 and 15 are the text layer's
+;    Not yet: background priority (tiles in front of sprites), sound.
 ;
 ; Controls: joystick in port 2 - fire attacks, second button (or Space) jumps.
 ;           Keyboard: 5 = coin, 1 = 1 player start, 2 = 2 players.
@@ -33,9 +41,14 @@ POTGO		equ	$034
 BLTCON0		equ	$040
 BLTCON1		equ	$042
 BLTAFWM		equ	$044
+BLTALWM		equ	$046
+BLTCPT		equ	$048
+BLTBPT		equ	$04c
 BLTAPT		equ	$050
 BLTDPT		equ	$054
 BLTSIZE		equ	$058
+BLTCMOD		equ	$060
+BLTBMOD		equ	$062
 BLTAMOD		equ	$064
 BLTDMOD		equ	$066
 COP1LC		equ	$080
@@ -65,40 +78,73 @@ CIAA_CRA	equ	$bfee01
 
 ; Background buffer: 24 tile columns (48 bytes) x 256 lines per plane, wrapping
 ; in both directions. Vertically the copper changes the modulo for one line;
-; horizontally the bitplane pointer simply moves on: map column C is drawn at
-; byte 2*C of its tile row, so it shares memory with column C-24 one line
+; horizontally the bitplane pointer simply moves on: memory column M is drawn
+; at byte 2*M of its tile row, so it shares memory with column M-24 one line
 ; further down, which is never on screen at the same time (17 columns are).
+; Memory column M shows map column M-16 (mod the map width): the view can
+; start up to 256 pixels left of the map's left edge, where the arcade wraps.
 VIEW_H		equ	224
 NPLANES		equ	8
 LINEB		equ	48
 BUFH		equ	256
 PLANESZ		equ	LINEB*BUFH
-PLANEALLOC	equ	16+PLANESZ+256+64	; slack before, map width after
+PLANEALLOC	equ	16+PLANESZ+320+64	; slack before, map width after
 FETCHB		equ	36			; 9 x 32 pixels (FMODE=1)
 MODULO		equ	LINEB-FETCHB
 WRAPMOD		equ	MODULO-PLANESZ
 NCOLSLOT	equ	24
+COLBIAS		equ	16			; memory column = map column + 16
 DISP_Y0		equ	$3c
-COPSIZE		equ	4096
+COPSIZE		equ	8192
 PALSECT		equ	8*(1+32)*4		; palette section at the start of each copper list
 TXROWS		equ	28			; arcade text rows 2-29 are visible
 TXSPR_SIZE	equ	16+VIEW_H*16+16		; 64-bit sprite: control, lines, end
 SPR_H0		equ	$a0			; sprite x of the left window edge
+NSLOTS		equ	14			; colour slots for the bitplanes (14, 15: text)
+NSPR		equ	128			; arcade sprites
+REC_SIZE	equ	20			; one blitter object (or the part of one
+					; above / below the buffer's line wrap):
+REC_DEST	equ	0			; l  destination, plane 0
+REC_H		equ	4			; w  lines
+REC_SHIFT	equ	6			; w  shift << 12
+REC_MASK	equ	8			; l  mask (16 words)
+REC_DATA	equ	12			; l  planes 0-3 (16 words each)
+REC_SLOT	equ	16			; w  colour slot
+SAVE_PER	equ	NPLANES*16*4		; background saved under one sprite
 
 ; platform variables (a4 relative inside the display code)
 		rsreset
 pv_io		rs.b	16			; last value written to each I/O port
+pv_slot_of	rs.b	24			; palette -> colour slot, -1: none
+pv_pal_of	rs.b	16			; colour slot -> palette, -1: none
+pv_nrec		rs.w	2			; blitter objects drawn in each buffer
 pv_in0		rs.b	1			; port 0 value (active low)
 pv_in1		rs.b	1			; port 1 value (active low)
+pv_indisp	rs.b	1			; the display context is running
+pv_dwork	rs.b	1			; display: a frame to draw
+pv_ddone	rs.b	1			; display: frame drawn, copper list set
+pv_bgoff	rs.b	1			; background disabled (port $0C)
+pv_drawn	rs.w	1			; frames drawn (for tools/harness/amiga_sim)
 pv_layout	rs.w	1			; 0: 64 x 128 tiles, 1: 128 x 64 (port $0E)
-pv_vx		rs.w	1			; view position in the map (pixels)
+pv_cmask	rs.w	1			; map width in tiles - 1
+pv_vx		rs.w	1			; view position in the map (pixels, signed)
 pv_vy		rs.w	1
-pv_copidx	rs.w	1
-pv_rowpal	rs.b	TXROWS*4		; text palette per row and sprite
-pv_rgb		rs.w	256			; background colours, 12 bit
-pv_txrgb	rs.w	128			; text colours (palette entries $300-$37F)
+pv_back		rs.w	1			; buffer being drawn (0 / 1)
+pv_bm		rs.l	1			; its bitmap (plane 0)
+pv_sh		rs.l	1			; its background shadow
+pv_rec		rs.l	1			; its blitter objects
+pv_save		rs.l	1			; the background saved under them
+pv_used		rs.l	1			; palettes on screen this frame
+pv_rr		rs.w	1
 pv_paldirty	rs.w	1			; copper lists whose palette section is stale
+pv_rowpal	rs.b	TXROWS*8		; text palette per row and sprite
+pv_rgb		rs.w	256			; background colours, 12 bit (pen 15: backdrop)
+pv_sprgb	rs.w	128			; sprite colours (follows pv_rgb: palettes 16-23)
+pv_txrgb	rs.w	128			; text colours (palette entries $300-$37F)
+pv_blank	rs.w	16			; unused slot: black, pen 15 backdrop
 pv_keys		rs.b	128
+pv_sprbuf	rs.b	4*NSPR			; sprite RAM, buffered on out ($06)
+pv_sprsnap	rs.b	4*NSPR			; the copy being drawn
 pv_size		rs.b	0
 
 ;------------------------------------------------------------------------------
@@ -125,6 +171,7 @@ super:
 	and.b	#$bf,CIAA_CRA
 	move.w	#$ff00,POTGO(a6)	; second fire button readable on POTINP
 
+	bsr	unpack_data
 	bsr	init_display
 	move.w	#$87e0,DMACON(a6)	; bitplanes, copper, blitter (nasty), sprites
 	move.w	#$c028,INTENA(a6)	; vertical blank + keyboard
@@ -149,6 +196,10 @@ CYC	macro
 	endm
 
 BOUNDARY macro
+	endm
+
+PLAT_IDLE macro				; let the display run until the next vblank
+	bsr	disp_run
 	endm
 
 PLAT_EI	macro				; enable + deliver a vblank that came while disabled
@@ -187,11 +238,22 @@ plat_in:
 .x	move.l	(sp)+,a0
 	rts
 
+; d7 = port, d0 = value. out ($06) buffers sprite RAM ($FE00-$FFFF) for the display.
+	Z80	ZFE00,$fe00
 plat_out:
 	move.l	a0,-(sp)
 	lea	pvars(pc),a0
 	move.b	d0,pv_io(a0,d7.w)
-	move.l	(sp)+,a0
+	cmp.w	#6,d7
+	bne.s	.x
+	movem.l	d0/a2,-(sp)
+	lea	(ZFE00,a6),a2
+	lea	pv_sprbuf(a0),a0
+	moveq	#NSPR-1,d0
+.c	move.l	(a2)+,(a0)+
+	dbf	d0,.c
+	movem.l	(sp)+,d0/a2
+.x	move.l	(sp)+,a0
 	rts
 
 ; Z80 ei: enable, and deliver an interrupt that came while disabled
@@ -221,24 +283,81 @@ plat_irq:				; (rt_core header; the Amiga uses lev3)
 	rte
 
 ;------------------------------------------------------------------------------
-; level 3: vertical blank -> update the display, then the Z80 interrupt
+; Two contexts share the CPU: the game, and the display (disp_main), which
+; runs only while the game is idle. A context not running is parked on its
+; own stack as d0-a6 + an exception frame (ctx_g / ctx_d point at it).
+
+; level 3: vertical blank -> inputs, then the Z80 interrupt, in the game's
+; context (if the display was running, it is parked)
 lev3:
 	btst	#5,CUSTOM+INTREQR+1
 	beq.s	.other
 	move.w	#$0020,CUSTOM+INTREQ
 	move.w	#$0020,CUSTOM+INTREQ
-	movem.l	d0-d7/a0/a2-a6,-(sp)	; a1 (bank pointer) is left alone
-	bsr	vblank_display
+	movem.l	d0-d7/a0-a6,-(sp)
+	lea	pvars(pc),a4
+	tst.b	pv_indisp(a4)
+	beq.s	.game
+	lea	ctx_d(pc),a0
+	move.l	sp,(a0)
+	sf	pv_indisp(a4)
+	move.l	ctx_g(pc),sp
+.game	movem.l	(sp),d0-d7/a0-a6	; the game's registers (a1: ROM bank pointer)
+	bsr	vblank_quick
 	lea	rt_vars(pc),a4
 	tst.b	RT_IE(a4)
 	beq.s	.pend
 	bsr	rt_irq_body
 	bra.s	.done
 .pend	st	RT_PENDING(a4)
-.done	movem.l	(sp)+,d0-d7/a0/a2-a6
+.done	move.l	a1,9*4(sp)		; (the interrupt may switch the ROM bank)
+	movem.l	(sp)+,d0-d7/a0-a6
 	rte
 .other	move.w	#$0050,CUSTOM+INTREQ	; copper / blitter
 	rte
+
+; the game is idle: run the display (if it has a frame to draw) until it is
+; done or the next vblank. Keeps all registers.
+disp_run:
+	move.l	a0,-(sp)
+	lea	pvars(pc),a0
+	tst.b	pv_dwork(a0)
+	movem.l	(sp)+,a0		; (keeps the flags)
+	beq.s	.x
+	move.w	#$006c,-(sp)		; exception frame: format 0, level 3 vector
+	pea	.x(pc)
+	move.w	sr,-(sp)
+	movem.l	d0-d7/a0-a6,-(sp)
+	move.w	#$2700,sr
+	lea	ctx_g(pc),a0
+	move.l	sp,(a0)
+	lea	pvars(pc),a0
+	st	pv_indisp(a0)
+	move.l	ctx_d(pc),sp
+	movem.l	(sp)+,d0-d7/a0-a6
+	rte
+.x	rts
+
+; the display context: one frame per round, then back to the game
+disp_main:
+	bsr	draw_frame
+	move.w	#$006c,-(sp)
+	pea	disp_main(pc)
+	move.w	#$2000,-(sp)
+	movem.l	d0-d7/a0-a6,-(sp)
+	move.w	#$2700,sr
+	lea	ctx_d(pc),a0
+	move.l	sp,(a0)
+	lea	pvars(pc),a0
+	sf	pv_indisp(a0)
+	sf	pv_dwork(a0)
+	st	pv_ddone(a0)
+	move.l	ctx_g(pc),sp
+	movem.l	(sp)+,d0-d7/a0-a6
+	rte
+
+ctx_g:	dc.l	0
+ctx_d:	dc.l	0
 
 ; level 2: keyboard (CIA-A serial port)
 lev2:
@@ -269,6 +388,66 @@ lev2:
 	rte
 
 ;------------------------------------------------------------------------------
+; boot: unpack the graphics and banked ROM (tools/lzpack.py format), make the
+; sprite masks, clear the display buffers (they reuse the packed data's space)
+unpack_data:
+	lea	lz_banks(pc),a0
+	lea	z80banks(pc),a1
+	bsr	lz_unpack
+	lea	lz_tiles(pc),a0
+	lea	bgtiles(pc),a1
+	bsr	lz_unpack
+	lea	lz_chars(pc),a0
+	lea	chars(pc),a1
+	bsr	lz_unpack
+	lea	lz_sprites(pc),a0
+	lea	sprites(pc),a1
+	bsr	lz_unpack
+	lea	sprites(pc),a0		; mask: 1 where any pen but 15 (transparent)
+	lea	sprmask(pc),a1
+	move.w	#2048-1,d7
+.sm	moveq	#15,d6
+.sl	move.w	(a0),d0
+	and.w	32(a0),d0
+	and.w	64(a0),d0
+	and.w	96(a0),d0
+	not.w	d0
+	move.w	d0,(a1)+
+	addq.l	#2,a0
+	dbf	d6,.sl
+	lea	128-32(a0),a0
+	dbf	d7,.sm
+	lea	packed(pc),a0
+	move.l	#(reuse_end-packed)/4,d0
+.cl	clr.l	(a0)+
+	subq.l	#1,d0
+	bne.s	.cl
+	rts
+
+; a0 = packed, a1 = destination
+lz_unpack:
+.tok	moveq	#0,d0
+	move.b	(a0)+,d0
+	bmi.s	.match
+.lit	move.b	(a0)+,(a1)+		; $00-$7F: t+1 literal bytes
+	dbf	d0,.lit
+	bra.s	.tok
+.match	cmp.b	#$ff,d0
+	beq.s	.end
+	and.w	#$7f,d0			; $80-$FE: (t & $7F) + 3 bytes from distance
+	addq.w	#2,d0
+	moveq	#0,d1
+	move.b	(a0)+,d1
+	lsl.w	#8,d1
+	move.b	(a0)+,d1
+	move.l	a1,a2
+	sub.l	d1,a2
+.cp	move.b	(a2)+,(a1)+
+	dbf	d0,.cp
+	bra.s	.tok
+.end	rts
+
+;------------------------------------------------------------------------------
 init_display:
 	lea	pvars(pc),a4
 	lea	rev_table(pc),a0	; bit reversal table for x-flipped tiles
@@ -282,27 +461,27 @@ init_display:
 	move.b	d1,(a0,d0.w)
 	addq.b	#1,d0
 	bne.s	.rv
-	; text sprites: control words, 64 pixels wide, VIEW_H lines from DISP_Y0
+	; text sprites: control words, 64 pixels wide, VIEW_H lines from DISP_Y0;
+	; sprites 2n and 2n+1 cover the same 64 pixels
 	lea	txspr(pc),a0
-	move.w	#SPR_H0,d2
-	moveq	#3,d7
+	moveq	#0,d7
 .sp	move.w	#DISP_Y0,d0
 	move.w	#DISP_Y0+VIEW_H,d1
+	move.w	d7,d2
+	lsr.w	#1,d2
+	lsl.w	#6,d2
+	add.w	#SPR_H0,d2
 	bsr	sprite_ctl
 	lea	TXSPR_SIZE(a0),a0
-	add.w	#64,d2
-	dbf	d7,.sp
+	addq.w	#1,d7
+	cmp.w	#8,d7
+	bne.s	.sp
 	clr.w	pv_vx(a4)
 	clr.w	pv_vy(a4)
 	move.w	#-1,pv_layout(a4)	; forces a full redraw
-	lea	colpart(pc),a0		; per map column: byte offset in its row << 16
-	moveq	#0,d0			; | (C mod 24) * 4 (shadow offset)
-.cp	moveq	#0,d3
-	move.w	d0,d3
-	divu.w	#NCOLSLOT,d3
-	swap	d3
-	lsl.w	#2,d3
-	move.w	d0,d1
+	lea	colpart(pc),a0		; per map column: byte offset in its row
+	moveq	#0,d0
+.cp	move.w	d0,d1
 	and.w	#15,d1
 	move.w	d0,d2
 	and.w	#$30,d2
@@ -310,7 +489,6 @@ init_display:
 	add.w	d2,d1
 	add.w	d1,d1
 	move.w	d1,(a0)			; layout 0
-	move.w	d3,2(a0)
 	move.w	d0,d1
 	and.w	#15,d1
 	move.w	d0,d2
@@ -318,15 +496,40 @@ init_display:
 	lsl.w	#4,d2
 	add.w	d2,d1
 	add.w	d1,d1
-	move.w	d1,512(a0)		; layout 1
-	move.w	d3,514(a0)
-	addq.l	#4,a0
+	move.w	d1,256(a0)		; layout 1
+	addq.l	#2,a0
 	addq.w	#1,d0
 	cmp.w	#128,d0
 	bne.s	.cp
+	lea	mshoff(pc),a0		; per memory column: shadow offset (M mod 24) * 4
+	moveq	#0,d0
+.ms	moveq	#0,d1
+	move.w	d0,d1
+	divu.w	#NCOLSLOT,d1
+	swap	d1
+	lsl.w	#2,d1
+	move.w	d1,(a0)+
+	addq.w	#1,d0
+	cmp.w	#160,d0
+	bne.s	.ms
+	lea	pv_slot_of(a4),a0	; no colour slots given out
+	moveq	#24+16-1,d0
+.ns	st	(a0)+
+	dbf	d0,.ns
 	moveq	#-1,d0
 	move.b	d0,pv_in0(a4)
 	move.b	d0,pv_in1(a4)
+	lea	disp_stack_top(pc),a0	; the display context, parked at its start
+	move.w	#$006c,-(a0)
+	lea	disp_main(pc),a1
+	move.l	a1,-(a0)
+	move.w	#$2000,-(a0)
+	lea	-15*4(a0),a0
+	lea	ctx_d(pc),a1
+	move.l	a0,(a1)
+	st	pv_ddone(a4)		; first frame at the first vblank
+	clr.w	pv_back(a4)
+	bsr	set_buffer
 	move.w	#2,pv_paldirty(a4)
 	bsr	build_copper
 	lea	CUSTOM,a6
@@ -360,23 +563,72 @@ sprite_ctl:
 	move.w	d3,8(a0)		; CTL (64-bit control words)
 	rts
 
+; pv_back -> the buffer's bitmap, shadow, object list and save area
+set_buffer:
+	tst.w	pv_back(a4)
+	bne.s	.b1
+	lea	bitmap0(pc),a0
+	move.l	a0,pv_bm(a4)
+	lea	bgshadow0(pc),a0
+	move.l	a0,pv_sh(a4)
+	lea	rec0(pc),a0
+	move.l	a0,pv_rec(a4)
+	lea	save0(pc),a0
+	move.l	a0,pv_save(a4)
+	rts
+.b1	lea	bitmap1(pc),a0
+	move.l	a0,pv_bm(a4)
+	lea	bgshadow1(pc),a0
+	move.l	a0,pv_sh(a4)
+	lea	rec1(pc),a0
+	move.l	a0,pv_rec(a4)
+	lea	save1(pc),a0
+	move.l	a0,pv_save(a4)
+	rts
+
 ;------------------------------------------------------------------------------
-; once per frame, in the vertical blank interrupt
 	Z80	ZD000,$d000
 	Z80	ZD400,$d400
 	Z80	ZD800,$d800
 	Z80	ZDC00,$dc00
 
-vblank_display:
+; in the vertical blank interrupt: inputs, and if the display finished a frame
+; (its copper list is on screen from this vblank), the next one can start
+vblank_quick:
+	lea	pvars(pc),a4
+	lea	CUSTOM,a6
+	bsr	read_inputs
+	tst.b	pv_ddone(a4)
+	beq.s	.x
+	sf	pv_ddone(a4)
+	st	pv_dwork(a4)
+.x	rts
+
+; one frame, into the buffer not on screen; its copper list is shown from the
+; next vblank. Runs in the display context: the game can run in between
+; (video RAM may change while it is read; the shadows record what was drawn)
+draw_frame:
 	lea	pvars(pc),a4
 	lea	z80mem+$8000(pc),a5
 	lea	CUSTOM,a6
-	bsr	read_inputs
+	move.w	#$2700,sr		; sprite RAM as buffered by the game
+	lea	pv_sprbuf(a4),a0
+	lea	pv_sprsnap(a4),a2
+	moveq	#NSPR-1,d0
+.sn	move.l	(a0)+,(a2)+
+	dbf	d0,.sn
+	move.w	#$2000,sr
+	eor.w	#1,pv_back(a4)
+	bsr	set_buffer
+	bsr	restore_bobs
 	bsr	update_palette
 	bsr	update_text
 	bsr	update_background
+	bsr	draw_bobs
 	bsr	build_copper
-	move.l	coplist_ptr(pc),COP1LC(a6)	; used from the next frame
+	bsr	blit_wait
+	move.l	coplist_ptr(pc),COP1LC(a6)	; used from the next vblank
+	addq.w	#1,pv_drawn(a4)
 	rts
 
 read_inputs:
@@ -436,8 +688,8 @@ read_inputs:
 	rts
 
 ;------------------------------------------------------------------------------
-; text layer: arcade rows 2-29 into the four sprites. Rows are compared with
-; the shadow copy 4 bytes at a time; only a changed row is looked at per cell.
+; text layer: arcade rows 2-29 into the sprites. Rows are compared with the
+; shadow copy 4 bytes at a time; a changed row is drawn again in full.
 update_text:
 	lea	txshadow(pc),a3
 	moveq	#0,d5			; row 0-27
@@ -448,132 +700,206 @@ update_text:
 	lea	(a3,d0.w),a2
 	moveq	#7,d1
 .cc	cmpm.l	(a0)+,(a2)+
-	bne.s	.cells
+	bne.s	.chg
 	dbf	d1,.cc
 	lea	(ZD400,a5,d0.w),a0
 	lea	$400(a3,d0.w),a2
 	moveq	#7,d1
 .ca	cmpm.l	(a0)+,(a2)+
-	bne.s	.cells
+	bne.s	.chg
 	dbf	d1,.ca
 	bra.s	.same
-.cells	moveq	#0,d6			; column 0-31
-.col	move.w	d5,d0
-	addq.w	#2,d0
-	lsl.w	#5,d0
-	add.w	d6,d0			; arcade cell index
-	move.b	(ZD000,a5,d0.w),d1	; code
-	move.b	(ZD400,a5,d0.w),d2	; attribute
-	cmp.b	(a3,d0.w),d1
-	bne.s	.chg
-	cmp.b	$400(a3,d0.w),d2
-	beq.s	.next
-.chg	move.b	d1,(a3,d0.w)
-	move.b	d2,$400(a3,d0.w)
-	bsr	draw_char
-.next	addq.w	#1,d6
-	cmp.w	#32,d6
-	bne.s	.col
-	bsr	row_palettes
+.chg	lea	(ZD000,a5,d0.w),a0	; copy the row, then draw it from the copy
+	lea	(a3,d0.w),a2
+	moveq	#7,d1
+.cp	move.l	$400(a0),$400(a2)
+	move.l	(a0)+,(a2)+
+	dbf	d1,.cp
+	bsr	draw_row
 .same	addq.w	#1,d5
 	cmp.w	#TXROWS,d5
 	bne.s	.row
 	rts
 
-; d1 = code low byte, d2 = attribute, d5 = row, d6 = column
-draw_char:
-	movem.l	d0-d2/a0/a2,-(sp)
-	moveq	#0,d0
-	move.b	d2,d0
-	and.w	#$e0,d0
-	lsl.w	#3,d0
-	move.b	d1,d0			; character number
-	lsl.w	#4,d0
-	lea	chars(pc),a2
-	add.w	d0,a2			; 8 x (plane A, plane B)
-	lea	txspr+16(pc),a0
-	move.w	d6,d0
-	lsr.w	#3,d0
-	mulu.w	#TXSPR_SIZE,d0
-	add.l	d0,a0
-	moveq	#7,d0
-	and.w	d6,d0
-	add.w	d0,a0
+; text row d5 from txshadow: per block of 8 characters, the first palette
+; goes to the even sprite, the next different one to the odd sprite (any
+; further palette is shown with the first)
+draw_row:
+	movem.l	d0-d7/a0-a3,-(sp)
 	move.w	d5,d0
-	lsl.w	#7,d0			; 8 lines x 16 bytes
-	add.w	d0,a0
-	moveq	#7,d0
-.l	move.b	(a2)+,(a0)
-	move.b	(a2)+,8(a0)
-	lea	16(a0),a0
-	dbf	d0,.l
-	movem.l	(sp)+,d0-d2/a0/a2
-	rts
-
-; text colours for row d5: per sprite, the palette of its first visible character
-row_palettes:
-	movem.l	d0-d3/d6/a0/a3,-(sp)
-	lea	pv_rowpal(a4),a0
-	move.w	d5,d0
-	lsl.w	#2,d0
-	add.w	d0,a0
-	lea	charblank(pc),a3
-	moveq	#0,d6			; column
-.blk	moveq	#0,d3			; palette (0 if the block is empty)
-	moveq	#7,d2
-.c	move.w	d5,d0
 	addq.w	#2,d0
 	lsl.w	#5,d0
-	add.w	d6,d0			; cell
-	addq.w	#1,d6
+	lea	txshadow(pc),a3
+	add.w	d0,a3			; the row's codes, attributes at +$400
+	lea	pv_rowpal(a4),a1
+	move.w	d5,d0
+	lsl.w	#3,d0
+	add.w	d0,a1
+	lea	txspr+16(pc),a2		; block 0, even sprite, this row
+	move.w	d5,d0
+	lsl.w	#7,d0			; 8 lines x 16 bytes
+	add.w	d0,a2
+	moveq	#3,d7			; block
+.blk	moveq	#-1,d3			; palettes A, B
+	moveq	#-1,d4
+	moveq	#7,d6
+.fp	bsr	cell_char
+	bmi.s	.fn			; (blank)
+	moveq	#$1f,d1
+	and.b	$400(a3),d1
+	tst.w	d3
+	bpl.s	.fa
+	move.w	d1,d3
+	bra.s	.fn
+.fa	cmp.w	d3,d1
+	beq.s	.fn
+	tst.w	d4
+	bpl.s	.fn
+	move.w	d1,d4
+.fn	addq.l	#1,a3
+	dbf	d6,.fp
+	subq.l	#8,a3
+	move.b	d3,(a1)+		; ($ff: none)
+	move.b	d4,(a1)+
+	moveq	#7,d6
+.dc	bsr	cell_char		; a0 = character
+	moveq	#0,d2			; drawn into: the even sprite
+	move.l	#TXSPR_SIZE,d5		; cleared: the odd one
+	moveq	#$1f,d1
+	and.b	$400(a3),d1
+	cmp.w	d4,d1
+	bne.s	.ev
+	exg	d2,d5			; palette B: the other way round
+.ev	moveq	#7,d1
+.ln	move.b	(a0)+,(a2,d2.l)
+	move.b	(a0)+,8(a2,d2.l)
+	clr.b	(a2,d5.l)
+	clr.b	8(a2,d5.l)
+	lea	16(a2),a2
+	dbf	d1,.ln
+	lea	1-8*16(a2),a2		; next column
+	addq.l	#1,a3
+	dbf	d6,.dc
+	lea	2*TXSPR_SIZE-8(a2),a2	; next block
+	dbf	d7,.blk
+	movem.l	(sp)+,d0-d7/a0-a3
+	rts
+
+; (a3) = code, $400(a3) = attribute -> a0 = character data; N set if it is
+; blank. Uses d0-d1.
+cell_char:
+	moveq	#0,d0
+	move.b	$400(a3),d0
+	and.w	#$e0,d0
+	lsl.w	#3,d0
+	move.b	(a3),d0			; character number
+	lea	charblank(pc),a0
+	move.b	(a0,d0.w),d1
+	lea	chars(pc),a0
+	lsl.l	#4,d0
+	add.l	d0,a0
+	neg.b	d1
+	rts
+
+;------------------------------------------------------------------------------
+; colour slots. Slot s is AGA colours 16s-16s+15; a pixel's planes 4-7 hold
+; its slot. A palette keeps its slot while it is in use; one that needs a slot
+; takes a free one, or one whose palette isn't on screen this frame (the cells
+; drawn with that palette, in both buffers, are then drawn again when seen).
+
+; d0.w = palette (0-15 background, 16-23 sprites) -> d0.w = its slot
+get_slot:
+	movem.l	d1-d3/a0,-(sp)
+	move.l	pv_used(a4),d3
+	bset	d0,d3
+	move.l	d3,pv_used(a4)
 	moveq	#0,d1
-	move.b	(ZD400,a5,d0.w),d1	; attribute
-	and.w	#$e0,d1
-	lsl.w	#3,d1
-	move.b	(ZD000,a5,d0.w),d1	; character number
-	tst.b	(a3,d1.w)
-	bne.s	.blank
-	moveq	#$1f,d3
-	and.b	(ZD400,a5,d0.w),d3
-	add.w	d2,d6			; skip the rest of the block
-	bra.s	.set
-.blank	dbf	d2,.c
-.set	move.b	d3,(a0)+
-	cmp.w	#32,d6
-	blo.s	.blk
-	movem.l	(sp)+,d0-d3/d6/a0/a3
+	move.b	pv_slot_of(a4,d0.w),d1
+	bpl.s	.have
+	lea	pv_pal_of(a4),a0
+	moveq	#NSLOTS-1,d1
+.free	tst.b	(a0,d1.w)
+	bmi.s	.take
+	dbf	d1,.free
+	moveq	#NSLOTS-1,d1
+.idle	moveq	#0,d2
+	move.b	(a0,d1.w),d2
+	btst	d2,d3
+	beq.s	.evict
+	dbf	d1,.idle
+	move.w	pv_rr(a4),d1		; more than 15 palettes on screen: take any
+	addq.w	#1,d1
+	cmp.w	#NSLOTS,d1
+	blo.s	.rr
+	moveq	#0,d1
+.rr	move.w	d1,pv_rr(a4)
+.evict	moveq	#0,d2
+	move.b	(a0,d1.w),d2
+	st	pv_slot_of(a4,d2.w)
+	cmp.w	#16,d2
+	bhs.s	.take
+	bsr	forget_pal
+.take	move.b	d0,(a0,d1.w)
+	move.b	d1,pv_slot_of(a4,d0.w)
+	move.w	#2,pv_paldirty(a4)
+.have	move.w	d1,d0
+	movem.l	(sp)+,d1-d3/a0
+	rts
+
+; d2 = background palette: forget the cells drawn with it in both buffers
+forget_pal:
+	movem.l	d0-d1/a0,-(sp)
+	lea	bgshadow0(pc),a0
+	move.w	#2*16*NCOLSLOT-1,d1
+.l	move.l	(a0)+,d0
+	lsr.w	#3,d0
+	and.w	#15,d0
+	cmp.w	d2,d0
+	bne.s	.n
+	move.l	#-1,-4(a0)
+.n	dbf	d1,.l
+	movem.l	(sp)+,d0-d1/a0
+	rts
+
+forget_all:
+	lea	bgshadow0(pc),a0
+	move.w	#2*16*NCOLSLOT-1,d1
+.l	move.l	#-1,(a0)+
+	dbf	d1,.l
 	rts
 
 ;------------------------------------------------------------------------------
 ; background: every visible cell is compared with what its buffer slot holds
-; (map row, map column, tile word); anything different is drawn. That covers
-; scrolling in any direction, changed tiles and layout switches alike.
+; (map row, memory column, tile word); anything different is drawn. That
+; covers scrolling in any direction, changed tiles and layout switches alike.
 update_background:
 	moveq	#1,d0
 	and.b	pv_io+$e(a4),d0		; layout
 	cmp.w	pv_layout(a4),d0
 	beq.s	.same
 	move.w	d0,pv_layout(a4)
-	lea	bgshadow(pc),a0		; new layout: nothing in the buffer is valid
-	move.w	#16*NCOLSLOT-1,d1
-.inv	move.l	#-1,(a0)+
-	dbf	d1,.inv
+	bsr	forget_all		; new layout: nothing in the buffers is valid
+	move.w	pv_layout(a4),d0
 .same	move.w	#1024,d2		; map width in pixels
 	move.w	#2048,d3		; and height
+	moveq	#63,d1
 	tst.w	d0
 	beq.s	.l0
 	exg	d2,d3
-.l0	moveq	#0,d0
+	moveq	#127,d1
+.l0	move.w	d1,pv_cmask(a4)
+	moveq	#0,d0
 	move.b	pv_io+9(a4),d0
 	lsl.w	#8,d0
 	move.b	pv_io+8(a4),d0
 	move.w	d2,d1
 	subq.w	#1,d1
 	and.w	d1,d0
-	sub.w	#256,d2
-	cmp.w	d2,d0
+	move.w	d2,d1
+	sub.w	#256,d1
+	cmp.w	d1,d0
 	bls.s	.xok
-	move.w	d2,d0			; (no horizontal wrap)
+	sub.w	d2,d0			; view across the left edge: negative
 .xok	move.w	d0,pv_vx(a4)
 	moveq	#0,d0
 	move.b	pv_io+$b(a4),d0
@@ -584,13 +910,12 @@ update_background:
 	and.w	d3,d0
 	move.w	d0,pv_vy(a4)
 
+	moveq	#2,d0
+	and.b	pv_io+$c(a4),d0
+	sne	pv_bgoff(a4)		; background off: blank cells
+	bsr	mark_used
 	bsr	blit_setup
-	move.w	pv_vy(a4),d6
-	lsr.w	#4,d6			; first visible map row
-	move.w	pv_vy(a4),d7
-	add.w	#VIEW_H-1,d7
-	lsr.w	#4,d7
-	sub.w	d6,d7			; rows - 1
+	bsr	view_rows
 .row	movem.w	d6-d7,-(sp)
 	bsr	bg_row
 	movem.w	(sp)+,d6-d7
@@ -598,11 +923,94 @@ update_background:
 	dbf	d7,.row
 	rts
 
-; check / draw the visible cells of map row d6 (unwrapped; used mod map height)
-bg_row:
-	move.w	d6,d5
-	moveq	#15,d0
-	and.w	d0,d5			; buffer slot
+; -> d6 = first visible map row (not wrapped), d7 = rows - 1
+view_rows:
+	move.w	pv_vy(a4),d6
+	lsr.w	#4,d6
+	move.w	pv_vy(a4),d7
+	add.w	#VIEW_H-1,d7
+	lsr.w	#4,d7
+	sub.w	d6,d7
+	rts
+
+; -> d4 = first visible map column (signed, not wrapped), d7 = columns - 1
+view_cols:
+	move.w	pv_vx(a4),d4
+	asr.w	#4,d4
+	move.w	pv_vx(a4),d7
+	add.w	#255,d7
+	asr.w	#4,d7
+	sub.w	d4,d7
+	rts
+
+; palettes on screen this frame -> pv_used (before any slot is given out)
+mark_used:
+	moveq	#0,d5
+	btst	#1,pv_io+$c(a4)		; background off?
+	bne.s	.spr
+	lea	colpart(pc),a0
+	tst.w	pv_layout(a4)
+	beq.s	.c0
+	lea	256(a0),a0
+.c0	bsr	view_rows
+.row	movem.w	d6-d7,-(sp)
+	bsr	row_ptr
+	bsr	view_cols
+.col	move.w	d4,d1
+	and.w	pv_cmask(a4),d1
+	move.w	(a0,d1.w*2),d1
+	move.b	1(a2,d1.w),d0		; attribute
+	lsr.b	#3,d0
+	and.w	#15,d0
+	bset	d0,d5
+	addq.w	#1,d4
+	dbf	d7,.col
+	movem.w	(sp)+,d6-d7
+	addq.w	#1,d6
+	dbf	d7,.row
+.spr	btst	#2,pv_io+$c(a4)		; sprites off?
+	bne.s	.x
+	lea	pv_sprsnap(a4),a0
+	moveq	#NSPR-1,d7
+.s	move.b	2(a0),d0		; y
+	beq.s	.n
+	cmp.b	#240,d0
+	bhs.s	.n
+	moveq	#0,d1
+	move.b	1(a0),d1
+	moveq	#0,d2
+	move.b	3(a0),d2
+	btst	#4,d1
+	beq.s	.xp
+	sub.w	#256,d2
+.xp	cmp.w	#-15,d2
+	blt.s	.n
+	and.w	#7,d1
+	add.w	#16,d1
+	bset	d1,d5
+.n	addq.l	#4,a0
+	dbf	d7,.s
+.x	move.l	d5,pv_used(a4)
+	rts
+
+; d6 = map row (not wrapped) -> d6 wrapped, a2 = its tile words. Uses d0-d1.
+row_ptr:
+	bsr.s	row_off
+	move.w	d0,d1
+	lsr.w	#8,d1
+	lsr.w	#4,d1			; 4K bank
+	cmp.b	rt_vars+RT_BGBANK(pc),d1
+	beq.s	.live
+	lea	bgram(pc),a2
+	add.w	d0,a2
+	rts
+.live	and.w	#$0fff,d0
+	lea	(ZC000,a5),a2		; the bank the Z80 sees at $C000
+	add.w	d0,a2
+	rts
+
+; d6 = map row (not wrapped) -> d6 wrapped, d0 = its offset in the 16K. Uses d1.
+row_off:
 	tst.w	pv_layout(a4)
 	bne.s	.r1
 	and.w	#127,d6
@@ -621,41 +1029,54 @@ bg_row:
 	and.w	#$30,d1
 	lsl.w	#8,d1
 .rc	add.w	d1,d0			; byte offset of the row in the 16K
-	move.w	d0,d1
-	lsr.w	#8,d1
-	lsr.w	#4,d1			; 4K bank
-	cmp.b	rt_vars+RT_BGBANK(pc),d1
-	beq.s	.live
-	lea	bgram(pc),a2
-	add.w	d0,a2
-	bra.s	.got
-.live	and.w	#$0fff,d0
-	lea	(ZC000,a5),a2		; the bank the Z80 sees at $C000
-	add.w	d0,a2
-.got	lea	colpart(pc),a0
+	rts
+
+; check / draw the visible cells of map row d6 (not wrapped)
+bg_row:
+	move.w	d6,d5
+	and.w	#15,d5			; buffer slot
+	bsr	row_off
+	move.w	d0,d3			; row offset in the 16K
+	lea	colpart(pc),a0
 	tst.w	pv_layout(a4)
 	beq.s	.cl0
-	lea	512(a0),a0
-.cl0	lea	bgshadow(pc),a3
+	lea	256(a0),a0
+.cl0	lea	mshoff(pc),a1
+	move.l	pv_sh(a4),a3
 	move.w	d5,d0
 	mulu.w	#NCOLSLOT*4,d0
 	add.w	d0,a3			; shadow of this slot
-	move.w	pv_vx(a4),d4
-	lsr.w	#4,d4			; first visible column
-	move.w	pv_vx(a4),d7
-	add.w	#255,d7
-	lsr.w	#4,d7
-	sub.w	d4,d7			; columns - 1
-.col	move.l	(a0,d4.w*4),d1
-	move.w	d1,d2			; shadow offset
-	swap	d1
+	bsr	view_cols
+	add.w	#COLBIAS,d4		; memory column
+.col	move.w	d4,d1
+	sub.w	#COLBIAS,d1
+	and.w	pv_cmask(a4),d1
+	move.w	(a0,d1.w*2),d1
+	add.w	d3,d1			; offset in the 16K
+	move.w	#$2700,sr		; (no bank switch by the game in between)
+	move.w	d1,d2
+	lsr.w	#8,d2
+	lsr.w	#4,d2
+	cmp.b	rt_vars+RT_BGBANK(pc),d2
+	beq.s	.live
+	lea	bgram(pc),a2
 	move.w	(a2,d1.w),d1		; tile word: code << 8 | attribute
+	bra.s	.got
+.live	and.w	#$0fff,d1
+	lea	(ZC000,a5),a2		; the bank the Z80 sees at $C000
+	move.w	(a2,d1.w),d1
+.got	move.w	#$2000,sr
+	move.w	(a1,d4.w*2),d2		; shadow offset
 	move.w	d6,d0
 	lsl.w	#8,d0
 	or.w	d4,d0
 	swap	d0
 	move.w	d1,d0			; key: row << 24 | column << 16 | tile
-	cmp.l	(a3,d2.w),d0
+	tst.b	pv_bgoff(a4)
+	beq.s	.on
+	clr.w	d0
+	bset	#31,d0
+.on	cmp.l	(a3,d2.w),d0
 	beq.s	.ok
 	move.l	d0,(a3,d2.w)
 	bsr	bg_draw
@@ -677,12 +1098,12 @@ blit_wait:
 	bne.s	.w
 	rts
 
-; draw cell: d0 = key, d2 = shadow offset, d4 = column, d5 = slot.
-; Column C also covers the memory of column C-24 one slot down and C+24 one
+; draw cell: d0 = key, d2 = shadow offset, d4 = memory column, d5 = slot.
+; Column M also covers the memory of column M-24 one slot down and M+24 one
 ; slot up: forget those if the shadow says they are there.
 bg_draw:
 	movem.l	d0-d7/a0/a2-a3,-(sp)
-	lea	bgshadow(pc),a3
+	move.l	pv_sh(a4),a3
 	move.w	d5,d1
 	addq.w	#1,d1
 	and.w	#15,d1
@@ -705,23 +1126,27 @@ bg_draw:
 	cmp.b	d6,d3
 	bne.s	.n2
 	move.l	#-1,(a3,d1.w)
-.n2	lea	bitmap+16(pc),a0
+.n2	move.l	pv_bm(a4),a0
 	move.w	d5,d1
 	mulu.w	#16*LINEB,d1
 	add.l	d1,a0
 	add.w	d4,a0
 	add.w	d4,a0			; + column * 2
-	bsr	draw_tile		; d0.w = tile word
+	bsr	draw_tile
 	movem.l	(sp)+,d0-d7/a0/a2-a3
 	rts
 
-colpart:	ds.l	256		; see init_display
+colpart:	ds.w	256		; see init_display
+mshoff:		ds.w	160
 
-; d0.w = code byte << 8 | attribute, a0 = destination (plane 0)
+; d0.l = key (bit 31: blank cell, else the low word is code byte << 8 |
+; attribute), a0 = destination (plane 0)
 ; attribute: bit 7 x flip, bits 6-3 colour, bits 2-0 code bits 8-10
 draw_tile:
 	movem.l	d0-d4/a0/a2/a3,-(sp)
 	move.l	a0,d4
+	tst.l	d0
+	bmi	.blank
 	moveq	#0,d1
 	move.b	d0,d1			; attribute
 	lsr.w	#8,d0
@@ -757,7 +1182,11 @@ draw_tile:
 	lea	32(a2),a2
 	add.l	#PLANEALLOC,a0
 	dbf	d2,.p
-	lsr.b	#3,d1			; colour: planes 4-7 all 0 or all 1
+	move.w	d1,d0
+	lsr.w	#3,d0
+	and.w	#15,d0
+	bsr	get_slot
+	move.w	d0,d1			; planes 4-7: the slot, all 0 or all 1
 	moveq	#3,d2
 .k	bsr	blit_wait
 	move.w	#$0100,d3
@@ -769,7 +1198,270 @@ draw_tile:
 	move.w	#(16<<6)|1,BLTSIZE(a6)
 	add.l	#PLANEALLOC,a0
 	dbf	d2,.k
-	movem.l	(sp)+,d0-d4/a0/a2/a3
+.x	movem.l	(sp)+,d0-d4/a0/a2/a3
+	rts
+.blank	moveq	#7,d2			; pen 15 (backdrop in every slot)
+.bl	bsr	blit_wait
+	move.w	#$01ff,d3
+	cmp.w	#3,d2
+	bhi.s	.b1
+	move.w	#$0100,d3
+.b1	move.w	d3,BLTCON0(a6)
+	move.l	a0,BLTDPT(a6)
+	move.w	#(16<<6)|1,BLTSIZE(a6)
+	add.l	#PLANEALLOC,a0
+	dbf	d2,.bl
+	bra.s	.x
+
+;------------------------------------------------------------------------------
+; sprites as blitter objects. Each frame: put back the background saved under
+; this buffer's objects (two frames ago), redraw the background, plan the
+; objects from the buffered sprite RAM (entry 127 first, so entry 0 ends on
+; top as on the arcade), save the background under all of them, draw them.
+
+restore_bobs:
+	move.w	pv_back(a4),d0
+	lea	pv_nrec(a4),a0
+	move.w	(a0,d0.w*2),d7
+	beq.s	.x
+	bsr	blit_wait
+	move.l	#-1,BLTAFWM(a6)
+	clr.w	BLTCON1(a6)
+	move.w	#$09f0,BLTCON0(a6)
+	clr.w	BLTAMOD(a6)
+	move.w	#LINEB-4,BLTDMOD(a6)
+	move.l	pv_rec(a4),a2
+	move.l	pv_save(a4),a3
+	subq.w	#1,d7
+.r	move.l	REC_DEST(a2),a0
+	move.w	REC_H(a2),d1
+	move.w	d1,d2
+	lsl.w	#6,d2
+	addq.w	#2,d2			; BLTSIZE: h lines x 2 words
+	lsl.w	#2,d1			; bytes per plane in the save area
+	moveq	#NPLANES-1,d6
+.p	bsr	blit_wait
+	move.l	a3,BLTAPT(a6)
+	move.l	a0,BLTDPT(a6)
+	move.w	d2,BLTSIZE(a6)
+	add.w	d1,a3
+	add.l	#PLANEALLOC,a0
+	dbf	d6,.p
+	lea	REC_SIZE(a2),a2
+	dbf	d7,.r
+.x	rts
+
+save_bobs:
+	bsr	blit_wait
+	move.l	#-1,BLTAFWM(a6)
+	clr.w	BLTCON1(a6)
+	move.w	#$09f0,BLTCON0(a6)
+	move.w	#LINEB-4,BLTAMOD(a6)
+	clr.w	BLTDMOD(a6)
+	move.l	pv_rec(a4),a2
+	move.l	pv_save(a4),a3
+	move.w	d7,d5
+	subq.w	#1,d5
+.r	move.l	REC_DEST(a2),a0
+	move.w	REC_H(a2),d1
+	move.w	d1,d2
+	lsl.w	#6,d2
+	addq.w	#2,d2
+	lsl.w	#2,d1
+	moveq	#NPLANES-1,d6
+.p	bsr	blit_wait
+	move.l	a0,BLTAPT(a6)
+	move.l	a3,BLTDPT(a6)
+	move.w	d2,BLTSIZE(a6)
+	add.w	d1,a3
+	add.l	#PLANEALLOC,a0
+	dbf	d6,.p
+	lea	REC_SIZE(a2),a2
+	dbf	d5,.r
+	rts
+
+; cookie cut: D = A.B + !A.C for the pen planes, D = A + C or !A.C for the
+; slot planes. A is the mask, 1 word wide read as 2 (modulo -2, last word
+; masked off), shifted into place together with B.
+blit_bobs:
+	bsr	blit_wait
+	move.w	#$ffff,BLTAFWM(a6)
+	clr.w	BLTALWM(a6)
+	move.w	#-2,BLTAMOD(a6)
+	move.w	#-2,BLTBMOD(a6)
+	move.w	#LINEB-4,BLTCMOD(a6)
+	move.w	#LINEB-4,BLTDMOD(a6)
+	move.l	pv_rec(a4),a2
+	move.w	d7,d5
+	subq.w	#1,d5
+.r	move.l	REC_DEST(a2),a0
+	move.w	REC_H(a2),d1
+	lsl.w	#6,d1
+	addq.w	#2,d1			; BLTSIZE
+	move.w	REC_SHIFT(a2),d2
+	move.l	REC_MASK(a2),d3
+	move.l	REC_DATA(a2),a3
+	move.w	REC_SLOT(a2),d4
+	moveq	#3,d6
+.p	bsr	blit_wait
+	move.w	d2,d0
+	or.w	#$0fca,d0
+	move.w	d0,BLTCON0(a6)
+	move.w	d2,BLTCON1(a6)
+	move.l	d3,BLTAPT(a6)
+	move.l	a3,BLTBPT(a6)
+	move.l	a0,BLTCPT(a6)
+	move.l	a0,BLTDPT(a6)
+	move.w	d1,BLTSIZE(a6)
+	lea	32(a3),a3
+	add.l	#PLANEALLOC,a0
+	dbf	d6,.p
+	moveq	#3,d6
+.k	bsr	blit_wait
+	move.w	d2,d0
+	or.w	#$0b0a,d0
+	lsr.w	#1,d4
+	bcc.s	.z
+	or.w	#$00f0,d0
+.z	move.w	d0,BLTCON0(a6)
+	move.l	d3,BLTAPT(a6)
+	move.l	a0,BLTCPT(a6)
+	move.l	a0,BLTDPT(a6)
+	move.w	d1,BLTSIZE(a6)
+	add.l	#PLANEALLOC,a0
+	dbf	d6,.k
+	lea	REC_SIZE(a2),a2
+	dbf	d5,.r
+	rts
+
+draw_bobs:
+	move.w	pv_back(a4),d0
+	lea	pv_nrec(a4),a0
+	clr.w	(a0,d0.w*2)
+	btst	#2,pv_io+$c(a4)		; sprites off?
+	bne	.x
+	bsr	blit_wait		; (flipbuf is free again)
+	move.l	pv_rec(a4),a2
+	lea	flipbuf(pc),a3
+	moveq	#0,d7			; objects
+	moveq	#NSPR-1,d6
+.spr	lea	pv_sprsnap(a4),a0
+	lea	(a0,d6.w*4),a0
+	moveq	#0,d5
+	move.b	2(a0),d5		; y
+	beq	.next
+	cmp.w	#240,d5
+	bhs	.next
+	moveq	#0,d1
+	move.b	1(a0),d1		; attribute
+	moveq	#0,d2
+	move.b	3(a0),d2		; x
+	btst	#4,d1
+	beq.s	.xp
+	sub.w	#256,d2
+.xp	cmp.w	#-15,d2
+	blt	.next
+	moveq	#7,d0
+	and.w	d1,d0
+	add.w	#16,d0
+	bsr	get_slot
+	move.w	d0,d3			; slot
+	moveq	#0,d0
+	move.w	d1,d0
+	and.w	#$e0,d0
+	lsl.w	#3,d0
+	move.b	(a0),d0			; sprite number
+	lea	sprmask(pc),a0
+	move.l	d0,d4
+	lsl.l	#5,d4
+	add.l	d4,a0
+	lea	sprites(pc),a1
+	lsl.l	#7,d0
+	add.l	d0,a1
+	btst	#3,d1
+	beq.s	.nf
+	bsr	flip_sprite
+.nf	add.w	pv_vx(a4),d2
+	add.w	#COLBIAS*16,d2		; x in the buffer
+	moveq	#15,d4
+	and.w	d2,d4
+	ror.w	#4,d4			; shift << 12
+	asr.w	#4,d2
+	add.w	d2,d2
+	ext.l	d2			; byte offset of the first word
+	add.w	pv_vy(a4),d5
+	sub.w	#16,d5
+	and.w	#255,d5			; first buffer line
+	moveq	#0,d0
+	move.w	d5,d0
+	mulu.w	#LINEB,d0
+	add.l	pv_bm(a4),d0
+	add.l	d2,d0
+	move.l	d0,(a2)+		; REC_DEST
+	move.w	#BUFH,d1
+	sub.w	d5,d1			; lines before the buffer wraps
+	cmp.w	#16,d1
+	blo.s	.h
+	moveq	#16,d1
+.h	move.w	d1,(a2)+		; REC_H
+	move.w	d4,(a2)+		; REC_SHIFT
+	move.l	a0,(a2)+		; REC_MASK
+	move.l	a1,(a2)+		; REC_DATA
+	move.w	d3,(a2)+		; REC_SLOT
+	addq.l	#2,a2
+	addq.w	#1,d7
+	cmp.w	#16,d1
+	beq.s	.next
+	move.l	pv_bm(a4),d0		; the rest from buffer line 0
+	add.l	d2,d0
+	move.l	d0,(a2)+
+	moveq	#16,d0
+	sub.w	d1,d0
+	move.w	d0,(a2)+
+	move.w	d4,(a2)+
+	add.w	d1,d1
+	lea	(a0,d1.w),a0
+	lea	(a1,d1.w),a1
+	move.l	a0,(a2)+
+	move.l	a1,(a2)+
+	move.w	d3,(a2)+
+	addq.l	#2,a2
+	addq.w	#1,d7
+.next	dbf	d6,.spr
+	move.w	pv_back(a4),d0
+	lea	pv_nrec(a4),a0
+	move.w	d7,(a0,d0.w*2)
+	tst.w	d7
+	beq.s	.x
+	bsr	save_bobs
+	bsr	blit_bobs
+.x	rts
+
+; a1 = sprite (4 planes x 16 words), a0 = its mask -> x-flipped copies at a3
+; (a1, a0 then point at them; a3 moves on)
+flip_sprite:
+	movem.l	d0-d2/a2,-(sp)
+	lea	rev_table(pc),a2
+	move.l	a3,-(sp)
+	moveq	#63,d2
+.d	moveq	#0,d0
+	move.b	(a1)+,d0
+	move.b	(a2,d0.w),d1
+	move.b	(a1)+,d0
+	move.b	(a2,d0.w),(a3)+
+	move.b	d1,(a3)+
+	dbf	d2,.d
+	moveq	#15,d2
+.m	moveq	#0,d0
+	move.b	(a0)+,d0
+	move.b	(a2,d0.w),d1
+	move.b	(a0)+,d0
+	move.b	(a2,d0.w),(a3)+
+	move.b	d1,(a3)+
+	dbf	d2,.m
+	move.l	(sp)+,a1
+	lea	128(a1),a0
+	movem.l	(sp)+,d0-d2/a2
 	rts
 
 ;------------------------------------------------------------------------------
@@ -778,8 +1470,10 @@ COPMOVE	macro
 	move.l	#((\1)<<16)|((\2)&$ffff),(a0)+
 	endm
 
-; palette RAM changed? (background 0-255 and text $300-$37F, compared with
-; the shadow 4 bytes at a time) -> recompute those colours
+; palette RAM changed? (background 0-255, sprites $200-$27F, text $300-$37F,
+; compared with the shadow 4 bytes at a time) -> recompute those colours
+	Z80	ZDA00,$da00
+	Z80	ZDE00,$de00
 	Z80	ZDB00,$db00
 	Z80	ZDF00,$df00
 	Z80	ZDBFC,$dbfc
@@ -793,10 +1487,16 @@ update_palette:
 	lea	(ZDC00,a5),a0		; background, high bytes
 	moveq	#64-1,d1
 	bsr.s	.cmp
-	lea	(ZDB00,a5),a0		; text, low bytes
+	lea	(ZDA00,a5),a0		; sprites
 	moveq	#32-1,d1
 	bsr.s	.cmp
-	lea	(ZDF00,a5),a0		; text, high bytes
+	lea	(ZDE00,a5),a0
+	moveq	#32-1,d1
+	bsr.s	.cmp
+	lea	(ZDB00,a5),a0		; text
+	moveq	#32-1,d1
+	bsr.s	.cmp
+	lea	(ZDF00,a5),a0
 	moveq	#32-1,d1
 	bsr.s	.cmp
 	lea	(ZDBFC,a5),a0		; backdrop (entry 1023), low and high
@@ -816,17 +1516,13 @@ update_palette:
 	rts
 .recalc	lea	pv_rgb(a4),a2
 	moveq	#0,d3
-.bg	move.w	d3,d0
-	moveq	#15,d1
-	and.w	d3,d1
-	cmp.w	#15,d1			; pen 15 is transparent on the arcade: backdrop
-	bne.s	.pen
-	move.w	#$3ff,d0
-.pen	bsr	pal_rgb
-	move.w	d0,(a2)+
-	addq.w	#1,d3
+.bg	bsr.s	.pal16			; background 0-255
 	cmp.w	#256,d3
 	bne.s	.bg
+	move.w	#$200,d3		; sprites (pv_sprgb follows pv_rgb)
+.sp	bsr.s	.pal16
+	cmp.w	#$280,d3
+	bne.s	.sp
 	lea	pv_txrgb(a4),a2
 	move.w	#$300,d3
 .tx	move.w	d3,d0
@@ -835,7 +1531,26 @@ update_palette:
 	addq.w	#1,d3
 	cmp.w	#$380,d3
 	bne.s	.tx
+	lea	pv_blank(a4),a2
+	moveq	#14,d0
+.bk	clr.w	(a2)+
+	dbf	d0,.bk
+	move.w	#$3ff,d0
+	bsr	pal_rgb
+	move.w	d0,(a2)
 	move.w	#2,pv_paldirty(a4)	; both copper lists
+	rts
+; 16 colours from palette entry d3 to (a2); pen 15 (transparent) is the backdrop
+.pal16	moveq	#14,d4
+.p	move.w	d3,d0
+	bsr	pal_rgb
+	move.w	d0,(a2)+
+	addq.w	#1,d3
+	dbf	d4,.p
+	move.w	#$3ff,d0
+	bsr	pal_rgb
+	move.w	d0,(a2)+
+	addq.w	#1,d3
 	rts
 
 ; d0 = palette RAM index -> d0.w = $0RGB
@@ -851,14 +1566,24 @@ pal_rgb:
 	move.w	(sp)+,d1
 	rts
 
+; d6 = slot -> a2 = its 16 colours
+slot_colours:
+	lea	pv_blank(a4),a2
+	cmp.w	#NSLOTS,d6
+	bhs.s	.x
+	moveq	#0,d0
+	move.b	pv_pal_of(a4,d6.w),d0
+	bmi.s	.x
+	lsl.w	#5,d0
+	lea	pv_rgb(a4),a2		; (pv_sprgb follows: palettes 16-23)
+	add.w	d0,a2
+.x	rts
+
 build_copper:
 	lea	pvars(pc),a4
 	lea	z80mem+$8000(pc),a5
-	move.w	pv_copidx(a4),d0
-	eor.w	#4,d0
-	move.w	d0,pv_copidx(a4)
 	lea	coplist0(pc),a0
-	tst.w	d0
+	tst.w	pv_back(a4)
 	beq.s	.l0
 	lea	coplist1(pc),a0
 .l0	lea	coplist_ptr(pc),a2
@@ -868,19 +1593,23 @@ build_copper:
 	tst.w	pv_paldirty(a4)
 	beq.s	.palok
 	subq.w	#1,pv_paldirty(a4)
-	lea	pv_rgb(a4),a2
-	moveq	#0,d4
+	moveq	#0,d4			; colour bank: 2 slots
+	moveq	#0,d6			; slot
 .bank	move.w	#BPLCON3,(a0)+
 	move.w	d4,d1
 	ror.w	#3,d1
 	or.w	#$0040,d1		; lowres sprites
 	move.w	d1,(a0)+
 	move.w	#COLOR00,d1
-	moveq	#31,d5
+	moveq	#1,d3
+.slot	bsr	slot_colours
+	moveq	#15,d5
 .col	move.w	d1,(a0)+
 	move.w	(a2)+,(a0)+
 	addq.w	#2,d1
 	dbf	d5,.col
+	addq.w	#1,d6
+	dbf	d3,.slot
 	addq.w	#1,d4
 	cmp.w	#8,d4
 	bne.s	.bank			; leaves BPLCON3 at bank 7 for the text colours
@@ -888,12 +1617,7 @@ build_copper:
 .palok	lea	PALSECT(a0),a0
 .paldone
 	COPMOVE	FMODE,$000d		; 32-bit bitplane, 64-bit sprite fetch
-	move.w	#BPLCON0,(a0)+
-	move.w	#$0211,d1		; 8 planes
-	btst	#1,pv_io+$c(a4)
-	beq.s	.bgon
-	move.w	#$0201,d1		; background disabled
-.bgon	move.w	d1,(a0)+
+	COPMOVE	BPLCON0,$0211		; 8 planes
 	move.w	pv_vx(a4),d1		; fine scroll, as in src/viewer.s
 	add.w	#31,d1
 	and.w	#31,d1
@@ -914,7 +1638,7 @@ build_copper:
 	move.w	#BPLCON1,(a0)+
 	move.w	d2,(a0)+
 	COPMOVE	BPLCON2,$0024		; sprites in front
-	COPMOVE	BPLCON4,$00ff		; sprite colours from 240-255
+	COPMOVE	BPLCON4,$00fe		; sprite colours: even 240-255, odd 224-239
 	COPMOVE	DIWSTRT,$3ca1
 	COPMOVE	DIWSTOP,$1ca1
 	COPMOVE	DDFSTRT,$0038
@@ -925,17 +1649,15 @@ build_copper:
 	; bitplane pointers
 	move.w	pv_vy(a4),d1
 	and.w	#255,d1
-	move.w	d1,d6			; buffer line at the top of the view
-	mulu.w	#LINEB,d1
-	moveq	#0,d2
+	mulu.w	#LINEB,d1		; buffer line at the top of the view
 	move.w	pv_vx(a4),d2
-	add.w	#31,d2
+	add.w	#COLBIAS*16+31,d2
 	lsr.w	#5,d2
 	lsl.w	#2,d2
+	ext.l	d2
 	subq.l	#4,d2
 	add.l	d2,d1
-	lea	bitmap+16(pc),a3
-	add.l	a3,d1
+	add.l	pv_bm(a4),d1
 	move.w	#BPL1PTH,d3
 	moveq	#NPLANES-1,d7
 .ptr	move.w	d3,(a0)+
@@ -949,17 +1671,14 @@ build_copper:
 	add.l	#PLANEALLOC,d1
 	dbf	d7,.ptr
 
-	; sprite pointers: 0,2,4,6 text (if enabled), the rest empty
+	; sprite pointers: text (if enabled)
 	move.w	#SPR0PTH,d3
 	moveq	#0,d7
 .spr	lea	nullspr(pc),a3
 	move.l	a3,d1
-	btst	#0,d7
-	bne.s	.sset
 	btst	#7,pv_io+4(a4)		; characters off?
 	bne.s	.sset
 	move.w	d7,d1
-	lsr.w	#1,d1
 	mulu.w	#TXSPR_SIZE,d1
 	lea	txspr(pc),a3
 	add.l	a3,d1
@@ -1015,25 +1734,17 @@ build_copper:
 .c	cmp.w	cop_wrest(pc),d3
 	bne.s	.d
 	bsr	cop_modrest
-.d	lea	pv_rowpal(a4),a2	; colours 241-243, 245-247, 249-251, 253-255
-	move.w	d5,d0
-	lsl.w	#2,d0
+.d	lea	pv_rowpal(a4),a2	; colours 241-243, ... (even sprites),
+	move.w	d5,d0			; 225-227, ... (odd sprites)
+	lsl.w	#3,d0
 	add.w	d0,a2
 	move.w	#COLOR00+17*2,d2
+	move.w	#COLOR00+1*2,d6
 	moveq	#3,d7
-.sp4	moveq	#0,d0
-	move.b	(a2)+,d0
-	lsl.w	#3,d0			; 4 colours x 2 bytes
-	lea	pv_txrgb(a4,d0.w),a3
-	move.w	d2,(a0)+
-	move.w	(a3)+,(a0)+
-	addq.w	#2,d2
-	move.w	d2,(a0)+
-	move.w	(a3)+,(a0)+
-	addq.w	#2,d2
-	move.w	d2,(a0)+
-	move.w	(a3)+,(a0)+
-	addq.w	#4,d2
+.sp4	bsr	tx_cols
+	exg	d2,d6
+	bsr	tx_cols
+	exg	d2,d6
 	dbf	d7,.sp4
 	addq.w	#1,d5
 	cmp.w	#TXROWS,d5
@@ -1049,6 +1760,23 @@ build_copper:
 	bsr	cop_wait
 	bsr	cop_modrest
 .f	move.l	#$fffffffe,(a0)+
+	rts
+
+; (a2)+ = text palette, d2 = its first colour register -> 3 copper moves
+tx_cols:
+	moveq	#$1f,d0
+	and.b	(a2)+,d0
+	lsl.w	#3,d0			; 4 colours x 2 bytes
+	lea	pv_txrgb(a4,d0.w),a3
+	move.w	d2,(a0)+
+	move.w	(a3)+,(a0)+
+	addq.w	#2,d2
+	move.w	d2,(a0)+
+	move.w	(a3)+,(a0)+
+	addq.w	#2,d2
+	move.w	d2,(a0)+
+	move.w	(a3)+,(a0)+
+	addq.w	#4,d2
 	rts
 
 cop_modset:
@@ -1083,36 +1811,63 @@ cop_wait:
 cop_wset:	dc.w	0
 cop_wrest:	dc.w	0
 coplist_ptr:		dc.l	0
+bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py)
 
 ;------------------------------------------------------------------------------
 	cnop	0,4
 pvars:		ds.b	pv_size
 		ds.b	2048
 plat_stack_top:
+		ds.b	4096
+disp_stack_top:
 rev_table:	ds.b	256
 
 	include	"game.s"
 
 	cnop	0,8
 z80rom:		incbin	"z80fixed.bin"
-z80banks:	incbin	"z80banks.bin"
-bgtiles:	incbin	"bgtiles.bin"
-chars:		incbin	"chars.bin"
 charblank:	incbin	"charblank.bin"
+
+; packed data (tools/lzpack.py), unpacked at boot into the BSS
+	cnop	0,8
+packed:
+lz_banks:	incbin	"z80banks.lz"
+lz_tiles:	incbin	"bgtiles.lz"
+lz_chars:	incbin	"chars.lz"
+lz_sprites:	incbin	"sprites.lz"
+packed_end:
+
+; ... after which its space holds the display buffers
+bitmap0		equ	packed+16
+bitmap1		equ	bitmap0+PLANEALLOC*NPLANES
+coplist0	equ	bitmap1+PLANEALLOC*NPLANES
+coplist1	equ	coplist0+COPSIZE
+txspr		equ	coplist1+COPSIZE
+nullspr		equ	txspr+8*TXSPR_SIZE
+save0		equ	nullspr+32
+save1		equ	save0+NSPR*SAVE_PER
+rec0		equ	save1+NSPR*SAVE_PER
+rec1		equ	rec0+2*NSPR*REC_SIZE
+flipbuf		equ	rec1+2*NSPR*REC_SIZE
+fliptile	equ	flipbuf+NSPR*160
+reuse_end	equ	fliptile+128
+	ifgt	reuse_end-packed_end
+	fail	"display buffers don't fit in the packed data's space"
+	endif
 
 ; BSS: allocated (cleared) by the bootblock right after the loaded file
 	cnop	0,8
 bss_start:
-bitmap		equ	bss_start+16
-coplist0	equ	bitmap+PLANEALLOC*NPLANES
-coplist1	equ	coplist0+COPSIZE
-txspr		equ	coplist1+COPSIZE
-nullspr		equ	txspr+4*TXSPR_SIZE
-fliptile	equ	nullspr+32
-z80mem		equ	fliptile+128
+z80banks	equ	bss_start
+bgtiles		equ	z80banks+16*16384
+sprites		equ	bgtiles+2048*128
+chars		equ	sprites+2048*128
+sprmask		equ	chars+2048*16
+z80mem		equ	sprmask+2048*32
 bgram		equ	z80mem+65536
 task_stacks	equ	bgram+16384
-bgshadow	equ	task_stacks+16*1024
-txshadow	equ	bgshadow+16*NCOLSLOT*4
-palshadow	equ	txshadow+2048		; 776 bytes
-bss_end		equ	palshadow+776
+bgshadow0	equ	task_stacks+16*1024
+bgshadow1	equ	bgshadow0+16*NCOLSLOT*4
+txshadow	equ	bgshadow1+16*NCOLSLOT*4
+palshadow	equ	txshadow+2048		; 1032 bytes
+bss_end		equ	palshadow+1032

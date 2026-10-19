@@ -18,8 +18,17 @@ import convert_game  # noqa: E402
 import mkadf  # noqa: E402
 from z80 import codemap, translate  # noqa: E402
 import bt_rom  # noqa: E402
+import lzpack  # noqa: E402
 
-BSS = 420000
+PACKED = ["z80banks", "bgtiles", "chars", "sprites"]   # unpacked at boot
+
+
+def listing_symbol(lst, name):
+    for line in open(lst):
+        f = line.split()
+        if len(f) >= 2 and f[0] == name and f[1][:2] in ("A:", "E:"):
+            return int(f[1][2:], 16)
+    raise KeyError(name)
 
 
 def main():
@@ -31,6 +40,11 @@ def main():
 
     sys.argv = ["convert_game", a.roms, out]
     convert_game.main()
+    for name in PACKED:
+        data = open(os.path.join(out, name + ".bin"), "rb").read()
+        packed = lzpack.pack(data)
+        open(os.path.join(out, name + ".lz"), "wb").write(packed)
+        print("%s: %d -> %d bytes" % (name, len(data), len(packed)))
 
     rom = bt_rom.load_roms(a.roms)["maincpu"]
     entries = os.path.join(ROOT, "data", "code_entries.txt")
@@ -50,9 +64,12 @@ def main():
     boot = os.path.join(ROOT, "build", "boot.bin")
     build.assemble(os.path.join(ROOT, "src", "boot.s"), boot)
     payload = os.path.join(out, "game.bin")
+    lst = os.path.join(out, "game.lst")
     build.assemble(os.path.join(ROOT, "src", "amiga_main.s"), payload,
-                   incdir=out, extra=["-I" + os.path.join(ROOT, "src")])
-    mkadf.build(boot, payload, BSS, os.path.join(ROOT, "build", "blacktiger.adf"))
+                   incdir=out, extra=["-I" + os.path.join(ROOT, "src"), "-L", lst])
+    at = listing_symbol(lst, "bss_size")
+    bss = int.from_bytes(open(payload, "rb").read()[at:at + 4], "big")
+    mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"))
 
 
 if __name__ == "__main__":

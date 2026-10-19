@@ -145,7 +145,8 @@ sched_00c3:
 	beq.s	.wrap
 	CYC	5
 	bra	sched_00c3
-.wrap	BOUNDARY			; jr $00b6
+.wrap	PLAT_IDLE			; (no task ready: the platform's spare time)
+	BOUNDARY			; jr $00b6
 	CYC	12
 	bra	sched_00b6
 

@@ -155,6 +155,7 @@ def build(rom, dynamic_path=None):
             cm.entries.add((b, a))
             cm.add(b, a)
     static_tables(cm)
+    data_pointers(cm)
     # multi-way returns: code at return address + k is reachable too
     while True:
         _, multiway, _ = stack_depths(cm)
@@ -368,14 +369,54 @@ def static_tables(cm):
                 cm.add(*k)
 
 
-def _looks_like_code(cm, bank, addr):
-    """The first few instructions decode without undefined opcodes or prefixes."""
+def data_pointers(cm):
+    """Code addresses kept in data (object scripts and the like): a word
+    outside the known code that points at the address right after a known
+    unconditional jp / jr / ret, where the code map has nothing yet (code that
+    can't be fallen into, so only reached through a pointer), and that decodes
+    as code. Banked data is searched for pointers into its own bank, the fixed
+    ROM for pointers into the fixed ROM. Repeats while new code turns up."""
+    banks = [None] + list(range(16))
+    while True:
+        code = cm.code_bytes()
+        ends = set()                # (bank, addr) right after an unconditional transfer
+        for (b, a), ins in cm.insns.items():
+            if ins.cond is None and ins.kind in ("jp", "jr", "ret", "reti"):
+                ends.add(loc(b, a + ins.length))
+        found = set()
+        for bank in banks:
+            sp = Space(cm.rom, bank)
+            lo, hi = (0, 0x8000) if bank is None else (0x8000, 0xC000)
+            for a in range(lo, hi - 1):
+                if loc(bank, a) in code or loc(bank, a + 1) in code:
+                    continue
+                w = sp[a] | sp[a + 1] << 8
+                if not lo <= w < hi:
+                    continue
+                k = loc(bank, w)
+                if k in ends and k not in cm.insns and _looks_like_code(cm, bank, w, strict=True):
+                    found.add(k)
+        if not found:
+            return
+        for k in sorted(found, key=lambda k: (k[0] if k[0] is not None else -1, k[1])):
+            cm.entries.add(k)
+            cm.add(*k)
+
+
+def _looks_like_code(cm, bank, addr, strict=False):
+    """The first few instructions decode without undefined opcodes or prefixes
+    (strict: nor nop, halt, rst $38, ld r,r - typical of data)."""
     sp = Space(cm.rom, bank)
     pc = addr
     for _ in range(6):
         ins = decode(sp, pc)
         if "undefined" in ins.text or "ignored prefix" in ins.text or "bad prefix" in ins.text:
             return False
+        if strict:
+            t = ins.text
+            if t in ("nop", "halt", "rst $38") or (
+                    t.startswith("ld ") and len(t) == 6 and t[3] == t[5]):
+                return False
         if ins.kind in ("ret", "jp", "jr", "jpind", "reti") and ins.cond is None:
             return True
         pc += ins.length

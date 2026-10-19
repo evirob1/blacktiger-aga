@@ -21,6 +21,9 @@ BOUNDARY macro
 	nop
 	endm
 
+PLAT_IDLE macro
+	endm
+
 PLAT_EI	macro				; the harness raises interrupts itself
 	st	RT_IE(a4)
 	endm

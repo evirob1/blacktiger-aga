@@ -1,6 +1,7 @@
 """Render a full Amiga frame from an amiga_sim memory dump: follows the active
 copper list (palette, bitplane pointers, fine scroll, modulo changes, sprite
-pointers, colour changes per line) and draws bitplanes + the 64-pixel sprites,
+pointers, colour changes per line) and draws bitplanes + the 64-pixel sprites
+(text: sprites 2n / 2n+1 over the same 64 pixels, colours 240+ / 224+),
 for the 256 x 224 display window.
 
 usage: python3 tools/harness/render_frame.py build/amiga_mem.bin out.png
@@ -79,7 +80,6 @@ def main():
     con1 = state.get(0x102, 0)
     delay1 = (con1 & 15) | ((con1 >> 10) & 3) << 4     # PF1H in lowres pixels (bits 3-0, 11-10)
     fetchb = 36
-    sprites = [p for i, p in enumerate(sprptr) if i % 2 == 0]
     for y in range(H):
         l = DISP_Y0 + y
         for r, v in events.get(l, []):
@@ -96,12 +96,14 @@ def main():
                     v |= (byte >> (7 - (fx & 7)) & 1) << p
             c = rgb[v]
             s = x // 64
-            sp = sprites[s] + 16 + y * 16
             bit = 7 - (x & 7)
-            sa = mem[sp + (x & 63) // 8] >> bit & 1
-            sb = mem[sp + 8 + (x & 63) // 8] >> bit & 1
-            if sa | sb:
-                c = rgb[240 + s * 4 + (sa | sb << 1)]
+            for k, cbase in ((2 * s, 240), (2 * s + 1, 224)):   # even sprite in front
+                sp = sprptr[k] + 16 + y * 16
+                sa = mem[sp + (x & 63) // 8] >> bit & 1
+                sb = mem[sp + 8 + (x & 63) // 8] >> bit & 1
+                if sa | sb:
+                    c = rgb[cbase + s * 4 + (sa | sb << 1)]
+                    break
             px[x, y] = c
         for p in range(8):
             ptr[p] += fetchb + mod
