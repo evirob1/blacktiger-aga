@@ -14,7 +14,8 @@ set). Please don't distribute the built disk images.
 | ROM loading and CRC check, graphics decoding (tiles, sprites, text) | done |
 | Level maps and palettes extracted straight from ROM (all 8 levels) | done |
 | AGA scrolling engine: 8 bitplanes, 256 colours, 50 fps 2-way scrolling | done, pixel-exact against a reference render |
-| Main game code (Z80 to 68020 translation) | next |
+| Main game code: Z80 → 68020 translator and runtime | working: 3,000 frames of attract mode and play match MAME byte for byte (see [docs/TRANSLATOR.md](docs/TRANSLATOR.md)) |
+| Translated game on the Amiga screen | next |
 | Sprites (blitter objects), text layer, priorities | planned |
 | Protection MCU replacement, sound, WHDLoad/HD install | planned |
 
@@ -61,4 +62,9 @@ tools/preview.py      PNG sheets of the ROM graphics (needs Pillow)
 tools/render_ref.py   reference render used by the screenshot tests (needs Pillow)
 tools/mame/*.lua      MAME scripts used to measure the arcade game
 tools/test/           FS-UAE screenshot test harness
+tools/z80/            Z80 decoder, code map, timing table and the translator
+src/rt_core.s         runtime for the translated game (scheduler, banks, I/O)
+src/harness_main.s    test build of the translated game
+tools/harness/        68k test harness (Musashi) that checks the translation against MAME
+data/code_entries.txt Z80 code addresses seen running in MAME (addresses only)
 ```

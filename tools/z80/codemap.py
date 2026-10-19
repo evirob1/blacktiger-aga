@@ -14,6 +14,7 @@ from z80.decode import decode  # noqa: E402
 
 BANK_SETTER = 0x034B   # ld ($e0e3),a / out ($01),a / ret
 ENTRY_POINTS = [0x0000, 0x0038, 0x0066]
+NO_RETURN = {0x0135}   # scheduler: end current task
 
 
 class Space:
@@ -44,6 +45,7 @@ class CodeMap:
         self.indirect = set()      # (bank, addr) of jp (hl)/(ix)/(iy)
         self.unknown_bank = set()  # addr in $8000-$BFFF reached with unknown bank
         self.ram_targets = set()
+        self.bank_ctx = {}         # (bank, addr) -> bank mapped there (fixed code), False if mixed
 
     def add(self, bank, addr):
         """Trace from addr with `bank` mapped (None = unknown)."""
@@ -59,9 +61,14 @@ class CodeMap:
                     break
                 key = loc(bank, pc)
                 if key in self.insns:
+                    if key[0] is None and self.bank_ctx.get(key) not in (bank, False):
+                        # fixed code reached with another bank mapped: re-trace once as mixed
+                        if self.bank_ctx[key] is not None and bank is not None:
+                            self.bank_ctx[key] = False
                     break
                 ins = decode(Space(self.rom, bank), pc)
                 self.insns[key] = ins
+                self.bank_ctx[key] = bank
                 t = ins.text
                 nxt = pc + ins.length
                 # very small constant tracking: the value of A, for bank switches
@@ -88,6 +95,8 @@ class CodeMap:
                             self.calls.add(loc(bank, tgt))
                         work.append((bank, tgt, a_val if k in ("jp", "jr") else None))
                     if k in ("jp", "jr") and ins.cond is None:
+                        break
+                    if k == "call" and ins.cond is None and tgt in NO_RETURN:
                         break
                     if k in ("call", "rst"):
                         a_val = None
@@ -134,8 +143,31 @@ def build(rom, dynamic_path=None):
     for e in ENTRY_POINTS:
         cm.entries.add((None, e))
         cm.add(None, e)
+    cm.seeds = set()
     if dynamic_path:
+        # only seed from recorded addresses the static trace hasn't explained:
+        # those are the targets of computed jumps and task entry points
         for b, a in load_dynamic(dynamic_path):
+            if (b, a) in cm.insns:
+                continue
+            cm.seeds.add((b, a))
+            cm.entries.add((b, a))
+            cm.add(b, a)
+    # multi-way returns: code at return address + k is reachable too
+    while True:
+        _, multiway, _ = stack_depths(cm)
+        new = []
+        for key, ins in list(cm.insns.items()):
+            if ins.kind == "call" and loc(cm.bank_ctx.get(key) if key[0] is None else key[0],
+                                           ins.target) in multiway:
+                tb = cm.bank_ctx.get(key) if key[0] is None else key[0]
+                for k in multiway[loc(tb, ins.target)]:
+                    r = loc(key[0], key[1] + ins.length + k)
+                    if r not in cm.insns:
+                        new.append(r)
+        if not new:
+            break
+        for b, a in new:
             cm.entries.add((b, a))
             cm.add(b, a)
     return cm
@@ -163,3 +195,101 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def stack_report(cm):
+    """Routines that read or replace their own return address.
+
+    Walks each call target without following calls, tracking how many bytes
+    the routine has pushed. Returns {(bank, addr): [events]}.
+    """
+    found = {}
+    for entry in sorted(cm.calls, key=lambda k: (-1 if k[0] is None else k[0], k[1])):
+        seen = {}
+        work = [(entry, 0)]
+        while work:
+            key, depth = work.pop()
+            if key in seen or key not in cm.insns:
+                continue
+            seen[key] = depth
+            ins = cm.insns[key]
+            t = ins.text.split(" ;")[0]
+            ev = None
+            if t.startswith("push "):
+                depth += 2
+            elif t.startswith("pop "):
+                if depth == 0:
+                    ev = "pops return address into %s" % t[4:]
+                depth = max(depth - 2, 0)
+            elif t.startswith("ex (sp)") and depth == 0:
+                ev = "swaps return address (%s)" % t
+            elif t.startswith(("ld sp", "inc sp", "dec sp", "add hl,sp")):
+                ev = "stack pointer arithmetic (%s)" % t
+            elif ins.kind == "ret" and depth != 0:
+                ev = "returns with %d bytes pushed (jump to pushed value)" % depth
+            if ev:
+                found.setdefault(entry, []).append("%04x: %s" % (key[1], ev))
+            if ins.kind == "ret" and ins.cond is None or ins.kind in ("reti", "jpind"):
+                continue
+            if ins.kind in ("jp", "jr") and ins.target is not None:
+                work.append((loc(key[0], ins.target), depth))
+                if ins.cond is None and ins.text.split()[0] != "djnz":
+                    continue
+            if ins.kind == "call" and ins.cond is None and ins.target in NO_RETURN:
+                continue
+            work.append((loc(key[0], key[1] + ins.length), depth))
+    return found
+
+
+def stack_depths(cm):
+    """Stack depth (bytes pushed since routine entry) of every instruction.
+
+    Returns (depths, multiway, conflicts):
+      depths    {(bank, addr): set of depths}  (negative = popping the caller's frame)
+      multiway  {routine: set of k}  routines that can return to return-address + k
+      conflicts [text]
+    A pop at depth 0 consumes the return address.
+    """
+    depths = {}
+    multiway = {}
+    conflicts = []
+    for entry in sorted(cm.calls, key=lambda k: (-1 if k[0] is None else k[0], k[1])):
+        seen = set()
+        work = [(entry, 0)]
+        while work:
+            key, depth = work.pop()
+            if (key, depth) in seen or key not in cm.insns:
+                continue
+            seen.add((key, depth))
+            depths.setdefault(key, set()).add(depth)
+            ins = cm.insns[key]
+            t = ins.text.split(" ;")[0]
+            if t.startswith("pop ") and depth == 0 and t == "pop hl":
+                # pop hl / inc hl * k / jp (hl) ?
+                k, p = 0, key[1] + ins.length
+                nxt = cm.insns.get(loc(key[0], p))
+                while nxt is not None and nxt.text == "inc hl":
+                    k += 1
+                    p += nxt.length
+                    nxt = cm.insns.get(loc(key[0], p))
+                if nxt is not None and nxt.text == "jp (hl)":
+                    multiway.setdefault(entry, set()).add(k)
+                    continue
+            if t.startswith("push "):
+                depth += 2
+            elif t.startswith("pop "):
+                depth -= 2
+            if ins.kind == "ret" and ins.cond is None or ins.kind in ("reti", "jpind"):
+                continue
+            if ins.kind in ("jp", "jr") and ins.target is not None:
+                work.append((loc(key[0], ins.target), depth))
+                if ins.cond is None and t.split()[0] != "djnz":
+                    continue
+            if ins.kind == "call" and ins.cond is None and ins.target in NO_RETURN:
+                continue
+            work.append((loc(key[0], key[1] + ins.length), depth))
+    for key, ds in depths.items():
+        t = cm.insns[key].text
+        if t.startswith("pop ") and 0 in ds and len(ds) > 1:
+            conflicts.append("%04x %s: reached at depths %s" % (key[1], t, sorted(ds)))
+    return depths, multiway, conflicts
