@@ -15,7 +15,9 @@ set). Please don't distribute the built disk images.
 | Level maps and palettes extracted straight from ROM (all 8 levels) | done |
 | AGA scrolling engine: 8 bitplanes, 256 colours, 50 fps 2-way scrolling | done, pixel-exact against a reference render |
 | Main game code: Z80 → 68020 translator and runtime | working: 3,000 frames of attract mode and play match MAME byte for byte (see [docs/TRANSLATOR.md](docs/TRANSLATOR.md)) |
-| Translated game on the Amiga screen | next |
+| Translated game on the A1200: background, text layer, palette, joystick, keyboard | working: attract mode and play run at full speed (`build/blacktiger.adf`) |
+| Game sprites (player, enemies, shots), background priority | next |
+| Sound | planned |
 | Sprites (blitter objects), text layer, priorities | planned |
 | Protection MCU replacement, sound, WHDLoad/HD install | planned |
 
@@ -41,6 +43,17 @@ python tools/build.py --level 3  (just one)
 
 The disk images are written to `build/viewer_level1.adf` … `viewer_level8.adf`.
 
+The translated game itself:
+
+```
+python tools/build_game.py       -> build/blacktiger.adf
+```
+
+Controls: joystick in port 2 (fire = attack, second button or Space = jump,
+or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
+**2** = 2 players. Not there yet: the game's sprites (so you won't see the
+player or enemies), sound.
+
 ## Running in WinUAE
 
 1. Quickstart: model **A1200**, configuration **"Basic non-expanded A1200"** (2 MB chip, no fast RAM: the target machine). A Kickstart 3.x ROM is best; WinUAE's built-in AROS ROM also boots it.
@@ -65,6 +78,11 @@ tools/test/           FS-UAE screenshot test harness
 tools/z80/            Z80 decoder, code map, timing table and the translator
 src/rt_core.s         runtime for the translated game (scheduler, banks, I/O)
 src/harness_main.s    test build of the translated game
+src/amiga_main.s      the A1200 build: interrupts, inputs, display (background, text, palette)
+tools/convert_game.py graphics for the A1200 build
+tools/build_game.py   one-command build of build/blacktiger.adf
+tools/harness/amiga_sim.*     runs the A1200 build on Musashi (speed, memory dumps)
+tools/harness/render_frame.py draws a frame from such a dump, following the copper list
 tools/harness/        68k test harness (Musashi) that checks the translation against MAME
 data/code_entries.txt Z80 code addresses seen running in MAME (addresses only)
 ```

@@ -1,0 +1,265 @@
+/* Black Tiger AGA - run the Amiga game build (build/game/game.bin) on Musashi
+ * with a minimal stand-in for the A1200: custom chip reads return idle values,
+ * the blitter is always ready, and the vertical blank interrupt (level 3) comes
+ * every 283,750 68k cycles (a PAL frame at 14.19 MHz, no wait states).
+ *
+ * It reports, per second of Amiga time, how many cycles the vblank handler
+ * used and how far the arcade program got (its frame counter at $E003), and
+ * can dump the arcade text layer as ASCII-ish codes.
+ *
+ * usage: BT_RT_HEADER=<hex offset> amiga_sim game.bin seconds [dump_text_at_second ...]
+ *        (tools/harness/amiga_sim.sh finds the offset)
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "m68k.h"
+
+#define MEMSIZE 0x01000000
+#define BASE    0x00010000
+#define EXEC    0x00008000
+#define FRAME   283750
+
+static unsigned char mem[MEMSIZE];
+static unsigned int z80mem_off, vars_off;
+static int irq_pending;
+static unsigned long long now;            /* 68k cycles */
+static unsigned long long in_lev3, lev3_start;
+static int in_irq;
+static unsigned int lev3_addr;
+
+static unsigned int rd8(unsigned int a) { return mem[a & (MEMSIZE - 1)]; }
+static unsigned int rd16(unsigned int a) { return rd8(a) << 8 | rd8(a + 1); }
+static unsigned int rd32(unsigned int a) { return rd16(a) << 16 | rd16(a + 2); }
+
+static unsigned int custom_read(unsigned int reg)
+{
+    switch (reg & 0x1fe) {
+    case 0x002: return 0;                          /* DMACONR: blitter idle */
+    case 0x004: return 0;                          /* VPOSR */
+    case 0x006: return (unsigned int)(now / 64) & 0xffff;   /* VHPOSR moves */
+    case 0x016: return 0xffff;                     /* POTINP: buttons up */
+    case 0x01e: return irq_pending ? 0x0020 : 0;   /* INTREQR */
+    default: return 0;
+    }
+}
+
+unsigned int m68k_read_memory_8(unsigned int a)
+{
+    a &= 0xffffff;
+    if (a >= 0xdff000 && a < 0xdff200) return (a & 1) ? custom_read(a) & 0xff : custom_read(a) >> 8;
+    if (a >= 0xbfd000 && a < 0xbff000) return 0xff;
+    return rd8(a);
+}
+unsigned int m68k_read_memory_16(unsigned int a)
+{
+    a &= 0xffffff;
+    if (a >= 0xdff000 && a < 0xdff200) return custom_read(a);
+    return rd16(a);
+}
+unsigned int m68k_read_memory_32(unsigned int a) { return m68k_read_memory_16(a) << 16 | m68k_read_memory_16(a + 2); }
+unsigned int m68k_read_disassembler_16(unsigned int a) { return rd16(a); }
+unsigned int m68k_read_disassembler_32(unsigned int a) { return rd32(a); }
+
+/* the two blits the display code uses: A -> D copy ($09F0) and D fill ($0100 / $01FF) */
+static unsigned int blt[0x100];
+static void blit(void)
+{
+    unsigned int con0 = blt[0x40 / 2];
+    unsigned int apt = blt[0x50 / 2] << 16 | blt[0x52 / 2];
+    unsigned int dpt = blt[0x54 / 2] << 16 | blt[0x56 / 2];
+    int amod = (short)blt[0x64 / 2], dmod = (short)blt[0x66 / 2];
+    unsigned int size = blt[0x58 / 2];
+    int h = size >> 6 ? size >> 6 : 1024, w = size & 63 ? size & 63 : 64;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            unsigned int v;
+            if ((con0 & 0x0f00) == 0x0900) { v = rd16(apt); apt += 2; }
+            else v = (con0 & 0xff) ? 0xffff : 0;
+            mem[dpt & 0xffffff] = v >> 8;
+            mem[(dpt + 1) & 0xffffff] = v;
+            dpt += 2;
+        }
+        apt += amod;
+        dpt += dmod;
+    }
+}
+
+static void custom_write(unsigned int reg, unsigned int v)
+{
+    blt[(reg & 0x1fe) / 2] = v;
+    if ((reg & 0x1fe) == 0x058) blit();
+    if ((reg & 0x1fe) == 0x09c && !(v & 0x8000) && (v & 0x20)) {  /* INTREQ clear VERTB */
+        irq_pending = 0;
+        m68k_set_irq(0);
+    }
+    if ((reg & 0x1fe) == 0x180 && v == 0x0f00) {
+        unsigned int d7 = m68k_get_reg(NULL, M68K_REG_D7);
+        printf("red screen: computed jump to untranslated Z80 code: bank %02x address $%04x\n", (d7 >> 16) & 0xff, d7 & 0xffff);
+        exit(1);
+    }
+}
+
+void m68k_write_memory_8(unsigned int a, unsigned int v)
+{
+    a &= 0xffffff;
+    if (a >= 0xdff000 && a < 0xdff200) return;
+    if (a >= 0xbfd000 && a < 0xbff000) return;
+    mem[a] = v;
+}
+void m68k_write_memory_16(unsigned int a, unsigned int v)
+{
+    a &= 0xffffff;
+    if (a >= 0xdff000 && a < 0xdff200) { custom_write(a, v); return; }
+    mem[a] = v >> 8;
+    mem[a + 1] = v;
+}
+void m68k_write_memory_32(unsigned int a, unsigned int v)
+{
+    m68k_write_memory_16(a, v >> 16);
+    m68k_write_memory_16(a + 2, v & 0xffff);
+}
+
+/* BT_PROBES=a,b,c,...: hex offsets; reports the average cycles from each probe to the next */
+static unsigned int probes[16];
+static int nprobes, last_probe = -1;
+static unsigned long long probe_t, probe_sum[16], probe_n[16];
+
+static unsigned long long next_vbl = FRAME;
+static int vbl_due;
+
+void harness_hook(unsigned int pc)
+{
+    /* the vertical blank arrives at its exact cycle, between any two instructions */
+    if (!vbl_due && now + m68k_cycles_run() >= next_vbl) {
+        vbl_due = 1;
+        irq_pending = 1;
+        m68k_set_irq(3);
+        m68k_end_timeslice();
+    }
+    for (int i = 0; i < nprobes; i++)
+        if (pc == probes[i]) {
+            unsigned long long t = now + m68k_cycles_run();
+            if (last_probe >= 0 && i == last_probe + 1) { probe_sum[last_probe] += t - probe_t; probe_n[last_probe]++; }
+            last_probe = i;
+            probe_t = t;
+        }
+    if (pc == lev3_addr && !in_irq) { in_irq = 1; lev3_start = now; }
+    if (in_irq && rd16(pc) == 0x4e73) {             /* rte */
+        unsigned int sp = m68k_get_reg(NULL, M68K_REG_SP);
+        (void)sp;
+        in_lev3 += now - lev3_start;
+        in_irq = 0;
+    }
+}
+
+static int z80(unsigned int addr) { return BASE + z80mem_off + 0x8000 + (short)(addr & 0xffff); }
+
+/* every visible text cell: does the sprite data show what text RAM holds? */
+static void check_text(void)
+{
+    unsigned int txspr = BASE + (unsigned int)strtoul(getenv("BT_TXSPR"), NULL, 16);
+    unsigned int chars = BASE + (unsigned int)strtoul(getenv("BT_CHARS"), NULL, 16);
+    int bad = 0;
+    for (int row = 2; row < 30; row++)
+        for (int col = 0; col < 32; col++) {
+            int cell = row * 32 + col;
+            int attr = mem[z80(0xd400 + cell)];
+            int code = mem[z80(0xd000 + cell)] | (attr & 0xe0) << 3;
+            unsigned int spr = txspr + (col >> 3) * (16 + 224 * 16 + 16) + 16 + (row - 2) * 128 + (col & 7);
+            for (int y = 0; y < 8; y++)
+                if (mem[spr + y * 16] != mem[chars + code * 16 + y * 2] ||
+                    mem[spr + y * 16 + 8] != mem[chars + code * 16 + y * 2 + 1]) {
+                    if (bad < 10) printf("  text row %d col %d: char %03x not in the sprite data\n", row, col, code);
+                    bad++;
+                    break;
+                }
+        }
+    printf("  text cells wrong in the sprites: %d\n", bad);
+    if (getenv("BT_TXSHADOW")) {
+        unsigned int sh = BASE + (unsigned int)strtoul(getenv("BT_TXSHADOW"), NULL, 16);
+        int same = 0;
+        for (int i = 64; i < 960; i++) same += mem[sh + i] == mem[z80(0xd000 + i)];
+        printf("  renderer's copy of text RAM: %d of 896 codes match\n", same);
+    }
+}
+
+static void dump_text(void)
+{
+    for (int row = 0; row < 32; row++) {
+        printf("  %2d |", row);
+        for (int col = 0; col < 32; col++) {
+            int c = mem[z80(0xd000 + row * 32 + col)];
+            putchar(c >= 0x20 && c < 0x7f ? c : (c == 0 ? ' ' : '.'));
+        }
+        printf("|\n");
+    }
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 3) { fprintf(stderr, "usage: amiga_sim game.bin seconds [dump_at...]\n"); return 1; }
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) { perror(argv[1]); return 1; }
+    size_t len = fread(mem + BASE, 1, MEMSIZE - BASE - 0x400000, f);
+    fclose(f);
+    int seconds = atoi(argv[2]);
+    /* the platform code starts with lea super(pc),a5 / jsr -30(a6): fake Supervisor */
+    mem[EXEC - 30] = 0x4e; mem[EXEC - 29] = 0xd5;   /* jmp (a5) */
+    /* rt_header offset: from the assembler listing (tools/harness/amiga_sim.sh) */
+    unsigned int hdr = BASE + (unsigned int)strtoul(getenv("BT_RT_HEADER") ? getenv("BT_RT_HEADER") : "0", NULL, 16);
+    z80mem_off = hdr - BASE + rd32(hdr + 8);
+    vars_off = hdr - BASE + rd32(hdr + 16);
+
+    mem[0] = 0; mem[1] = 0x0f; mem[2] = 0; mem[3] = 0;          /* SSP */
+    mem[4] = BASE >> 24; mem[5] = BASE >> 16; mem[6] = BASE >> 8; mem[7] = BASE;
+    if (getenv("BT_PROBES")) {
+        char *p = getenv("BT_PROBES");
+        while (*p && nprobes < 16) {
+            probes[nprobes++] = BASE + (unsigned int)strtoul(p, &p, 16);
+            if (*p == ',') p++;
+        }
+    }
+    m68k_init();
+    m68k_set_cpu_type(M68K_CPU_TYPE_68020);
+    m68k_pulse_reset();
+    m68k_set_reg(M68K_REG_A6, EXEC);
+    m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
+
+    unsigned long long next = FRAME;
+    int frame = 0, dumpi = 3;
+    unsigned int last_e003 = 0, z80_frames = 0;
+    while (frame < seconds * 50) {
+        int c = m68k_execute(2000);
+        now += c;
+        if (!lev3_addr) lev3_addr = rd32(0x6c);
+        if (vbl_due) {
+            vbl_due = 0;
+            next_vbl += FRAME;
+            frame++;
+            unsigned int e003 = mem[z80(0xe003)];
+            z80_frames += (e003 - last_e003) & 0xff;
+            last_e003 = e003;
+            if (frame % 50 == 0) {
+                printf("second %d: vblank handler %.0f%% of the CPU, arcade frames this second %u, PC %06x\n",
+                       frame / 50, 100.0 * in_lev3 / (50.0 * FRAME), z80_frames,
+                       m68k_get_reg(NULL, M68K_REG_PC) - BASE);
+                in_lev3 = 0;
+                z80_frames = 0;
+                if (dumpi < argc && atoi(argv[dumpi]) == frame / 50) {
+                    dump_text();
+                    check_text();
+                    char dn[64];
+                    snprintf(dn, sizeof dn, "build/amiga_mem_%d.bin", frame / 50);
+                    FILE *df = fopen(dn, "wb");   /* for tools/harness/render_frame.py */
+                    fwrite(mem, 1, 0x400000, df);
+                    fclose(df);
+                    dumpi++;
+                }
+            }
+        }
+    }
+    for (int i = 0; i + 1 < nprobes; i++)
+        if (probe_n[i]) printf("probe %d -> %d: %llu cycles on average\n", i, i + 1, probe_sum[i] / probe_n[i]);
+    return 0;
+}

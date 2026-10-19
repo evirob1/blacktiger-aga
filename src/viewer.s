@@ -53,7 +53,7 @@ NPLANES		equ	8
 LINEB		equ	MAP_W*2			; bytes per plane line
 BUFH		equ	256			; buffer lines (16 tile rows)
 PLANESZ		equ	LINEB*BUFH		; must be <= 32768 for the modulo wrap
-FETCHB		equ	48			; 6 x 64 pixel blocks fetched per line (FMODE=3)
+FETCHB		equ	36			; 9 x 32 pixel blocks fetched per line (FMODE=1)
 MODULO		equ	LINEB-FETCHB
 WRAPMOD		equ	MODULO-PLANESZ
 DISP_Y0		equ	$3c			; first displayed line
@@ -283,16 +283,15 @@ build_copper:
 	move.l	v_cop(a5,d0.w),a0
 	move.l	a0,-(sp)
 
-	move.l	#(FMODE<<16)|3,(a0)+
+	move.l	#(FMODE<<16)|1,(a0)+	; 32-bit fetch: DDFSTRT $38 leaves all sprite DMA slots
 	move.l	#(BPLCON0<<16)|$0211,(a0)+	; 8 planes, ECSENA
-	; FMODE=3 fetches in 64 pixel blocks (DDFSTRT snaps to $18,$38,..). With
-	; DDFSTRT $18 the first fetched pixel is 96 pixels left of the window edge
-	; (DIW $a1), which leaves room for the full 0-63 pixel delay
+	; FMODE=1 fetches in 32 pixel blocks. With DDFSTRT $38 the first fetched
+	; pixel is 32 pixels left of the window edge (DIW $a1): delay 0-31
 	move.w	v_x(a5),d1
 	add.w	#31,d1
-	and.w	#63,d1
+	and.w	#31,d1
 	neg.w	d1
-	add.w	#63,d1				; delay = 63 - ((x+31) & 63)
+	add.w	#31,d1				; delay = 31 - ((x+31) & 31)
 	move.w	d1,d2
 	and.w	#15,d2
 	move.w	d2,d3
@@ -312,12 +311,12 @@ build_copper:
 	move.l	#(BPLCON4<<16)|$0000,(a0)+
 	move.l	#(DIWSTRT<<16)|$3ca1,(a0)+
 	move.l	#(DIWSTOP<<16)|$1ca1,(a0)+
-	move.l	#(DDFSTRT<<16)|$0018,(a0)+
+	move.l	#(DDFSTRT<<16)|$0038,(a0)+
 	move.l	#(DDFSTOP<<16)|$00b8,(a0)+
 	move.l	#(BPL1MOD<<16)|(MODULO&$ffff),(a0)+
 	move.l	#(BPL2MOD<<16)|(MODULO&$ffff),(a0)+
 
-	; plane pointers: buffer line (y & 255), byte column ((x+31)/64)*8-8
+	; plane pointers: buffer line (y & 255), byte column ((x+31)/32)*4-4
 	move.w	v_y(a5),d1
 	and.w	#255,d1
 	move.w	d1,d4				; keep ytop
@@ -325,9 +324,9 @@ build_copper:
 	moveq	#0,d2
 	move.w	v_x(a5),d2
 	add.w	#31,d2
-	lsr.w	#6,d2
-	lsl.w	#3,d2
-	subq.l	#8,d2
+	lsr.w	#5,d2
+	lsl.w	#2,d2
+	subq.l	#4,d2
 	add.l	d2,d1
 	add.l	v_bitmap(a5),d1
 	move.w	#BPL1PTH,d3

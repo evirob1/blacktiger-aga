@@ -86,6 +86,13 @@ those points the translator saves and restores the CCR (`move ccr,dN` /
 `move dN,ccr`). Parity after logic ops (`jp pe/po`) gets a table lookup if
 it's ever used.
 
+Jump tables are also read straight from the ROM: wherever `ld hl,TABLE` reaches
+the dispatcher at `$0408` (or the same lookup written inline ending in
+`jp (hl)`) with HL otherwise unchanged, the table's entries become entry points.
+A table ends at the first entry that isn't a code pointer, where it runs into
+code or into one of its own targets. This finds object behaviours the MAME
+recordings never reached (e.g. the 53-entry state table at `$4751`).
+
 ## Indirect jumps
 
 `jp (hl)`, task entry addresses and jump tables use Z80 addresses as data.
@@ -114,7 +121,10 @@ pushed at every instruction:
 
 ## Hand-written parts
 
-* the scheduler: `$00B3`–`$00F5` (scan loop, start, resume) and `$0116`–`$0134` (sleep);
+* the scheduler: `$00B3`–`$00F5` (scan loop, start, resume) and `$0116`–`$0134` (sleep).
+  Its own `ei`s go through the platform's `PLAT_EI`: on the Amiga that delivers a
+  vblank interrupt that arrived while interrupts were off (the Z80's interrupt
+  line stays asserted until accepted);
 * I/O ports: inputs, sound latch, bank switch, scroll, video enable, MCU (port 7).
 
 ## Verification

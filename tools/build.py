@@ -26,8 +26,8 @@ def vasm():
     return exe
 
 
-def assemble(src, out, incdir=None, defines=()):
-    cmd = [vasm(), "-quiet", "-Fbin", "-m68020", "-o", out]
+def assemble(src, out, incdir=None, defines=(), extra=()):
+    cmd = [vasm(), "-quiet", "-Fbin", "-m68020", "-o", out] + list(extra)
     if incdir:
         cmd.append("-I" + incdir)
     cmd += ["-D%s=%s" % d for d in defines]

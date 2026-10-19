@@ -46,6 +46,7 @@ class CodeMap:
         self.unknown_bank = set()  # addr in $8000-$BFFF reached with unknown bank
         self.ram_targets = set()
         self.bank_ctx = {}         # (bank, addr) -> bank mapped there (fixed code), False if mixed
+        self.tables = {}           # (bank, table address) -> entry points read from it
 
     def add(self, bank, addr):
         """Trace from addr with `bank` mapped (None = unknown)."""
@@ -153,6 +154,7 @@ def build(rom, dynamic_path=None):
             cm.seeds.add((b, a))
             cm.entries.add((b, a))
             cm.add(b, a)
+    static_tables(cm)
     # multi-way returns: code at return address + k is reachable too
     while True:
         _, multiway, _ = stack_depths(cm)
@@ -293,3 +295,88 @@ def stack_depths(cm):
         if t.startswith("pop ") and 0 in ds and len(ds) > 1:
             conflicts.append("%04x %s: reached at depths %s" % (key[1], t, sorted(ds)))
     return depths, multiway, conflicts
+
+
+DISPATCH = 0x0408   # add a,a / ld e,a / ld d,0 / add hl,de / ld e,(hl) / inc hl / ld d,(hl) / ex de,hl / jp (hl)
+
+
+def static_tables(cm):
+    """Jump tables found from the code: `ld hl,TABLE` followed within the same
+    block by a jump/call to the dispatcher at $0408, or by the inline lookup
+    `ld e,(hl) / inc hl / ld d,(hl) / ex de,hl / jp (hl)`. The table is read
+    until an entry is not a code pointer, the table runs into code, or 128
+    entries. Repeats while new code turns up."""
+    while True:
+        found = []
+        for key, ins in list(cm.insns.items()):
+            if not ins.text.startswith("ld hl,$") or len(ins.text) != 11:
+                continue
+            table = int(ins.text[-4:], 16)
+            bank = key[0] if key[0] is not None else cm.bank_ctx.get(key) or None
+            tkey = loc(bank, table)
+            if tkey in cm.tables or not (table < 0x8000 or (0x8000 <= table < 0xC000 and bank is not None)):
+                continue
+            pc, seq = key[1] + ins.length, []
+            for _ in range(10):
+                n = cm.insns.get(loc(key[0], pc))
+                if n is None:
+                    break
+                seq.append(n.text)
+                if n.kind in ("jp", "call") and n.target == DISPATCH or n.kind == "jpind":
+                    break
+                if n.kind in ("jp", "jr", "ret", "reti", "call", "rst") and n.cond is None:
+                    break
+                pc += n.length
+            if seq and seq[0] == "push hl":
+                continue                                    # a hand-pushed return address
+            # HL must reach the lookup unchanged except for an added index
+            end = len(seq)
+            for i, t in enumerate(seq):
+                if t == "ld e,(hl)" or t.startswith(("jp $%04x" % DISPATCH, "call $%04x" % DISPATCH)):
+                    end = i
+                    break
+            if any(t.startswith(("ld hl,", "ld h,", "ld l,", "pop hl", "ex de,hl", "ex (sp),hl",
+                                 "inc hl", "dec hl", "inc l", "dec l", "inc h", "dec h"))
+                   for t in seq[:end]):
+                continue
+            text = " / ".join(seq)
+            dispatch = ("$%04x" % DISPATCH) in text and seq and seq[-1].startswith(("jp $", "call $"))
+            inline = "ld e,(hl) / inc hl / ld d,(hl) / ex de,hl / jp (hl)" in text
+            if dispatch or inline:
+                found.append((tkey, bank))
+        if not found:
+            return
+        for (tb, ta), bank in found:
+            if tb is None:
+                bank = None             # a table in the fixed ROM points into the fixed ROM
+            sp = Space(cm.rom, bank)
+            entries = []
+            for i in range(128):
+                a = ta + 2 * i
+                if i and (loc(tb, a) in cm.insns or any(k[1] == a for k in entries)):
+                    break                                   # the table ran into code / its own target
+                w = sp[a] | sp[a + 1] << 8
+                if w in (0, 0xFFFF) or not (w < 0x8000 or (bank is not None and w < 0xC000)):
+                    break
+                k = loc(bank, w)
+                if k not in cm.insns and not _looks_like_code(cm, k[0], w):
+                    break
+                entries.append(k)
+            cm.tables[(tb, ta)] = entries
+            for k in entries:
+                cm.entries.add(k)
+                cm.add(*k)
+
+
+def _looks_like_code(cm, bank, addr):
+    """The first few instructions decode without undefined opcodes or prefixes."""
+    sp = Space(cm.rom, bank)
+    pc = addr
+    for _ in range(6):
+        ins = decode(sp, pc)
+        if "undefined" in ins.text or "ignored prefix" in ins.text or "bad prefix" in ins.text:
+            return False
+        if ins.kind in ("ret", "jp", "jr", "jpind", "reti") and ins.cond is None:
+            return True
+        pc += ins.length
+    return True

@@ -21,6 +21,10 @@ BOUNDARY macro
 	nop
 	endm
 
+PLAT_EI	macro				; the harness raises interrupts itself
+	st	RT_IE(a4)
+	endm
+
 	include	"rt_core.s"
 
 z80_ei:

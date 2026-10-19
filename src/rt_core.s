@@ -5,6 +5,7 @@
 ;   PLAT_OUT port    macro: Z80 I/O port write of d0.b
 ;   CYC n            macro: count n Z80 T-states (test build) or nothing
 ;   BOUNDARY         macro: mark a Z80 instruction boundary (test build) or nothing
+;   PLAT_EI          macro: the scheduler's own "ei" (must deliver a pending interrupt)
 ;   z80_bad_jump     routine: d7 = unknown (bank<<16|address)
 ;   z80_ei           routine: Z80 "ei" (set RT_IE(a4), run a pending interrupt)
 ;   plat_irq         68k interrupt handler that calls rt_irq_body
@@ -131,7 +132,7 @@ sched_00c3:
 	bhs	sched_00d6
 	BOUNDARY			; ei
 	CYC	4
-	st	RT_IE(a4)
+	PLAT_EI
 	BOUNDARY			; add hl,de
 	CYC	11
 	addq.l	#8,a0
@@ -161,7 +162,7 @@ sched_00d6:				; run slot d6 (a0 -> slot); interrupts are off
 	move.l	RT_TASK_SP(a4,d6.w*4),sp
 	movem.l	(sp)+,d0-d5
 	move.w	(sp)+,ccr
-	st	RT_IE(a4)
+	PLAT_EI
 	BOUNDARY
 	CYC	10			; ret
 	rts				; returns from the task's call to $0116
