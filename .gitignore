@@ -1,0 +1,6 @@
+roms/
+build/
+analysis/
+__pycache__/
+*.adf
+*.hdf
