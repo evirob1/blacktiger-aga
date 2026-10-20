@@ -61,11 +61,13 @@ rt_header:
 rt_init:
 	lea	rt_vars(pc),a4
 	lea	z80mem+$8000(pc),a6
+	ifnd	ROM_PRELOADED
 	lea	z80rom(pc),a0		; fixed ROM -> Z80 $0000-$7FFF
 	move.l	a6,a1
 	move.w	#$8000/4-1,d7
 .rom	move.l	(a0)+,(a1)+
 	dbf	d7,.rom
+	endif
 	moveq	#0,d0
 	bsr	set_bank
 	moveq	#0,d0

@@ -162,6 +162,7 @@ def build(rom, dynamic_path=None):
         gap_routines(cm)
         bank_entry_tables(cm)
         object_handlers(cm)
+        object_scripts(cm)
         multiway_returns(cm)
         if len(cm.insns) == n:
             break
@@ -450,6 +451,67 @@ def object_handlers(cm):
                     cm.add(*e)
                 code = cm.code_bytes()
             i = data.find(HANDLER_PREFIX, i + 1)
+
+
+def object_scripts(cm):
+    """Object animation scripts (run by $32E6 / $3006): records of 5 bytes
+    (a frame), or 00 + address (run that code, which continues the script
+    3 bytes on), FF + address (go to that script), FE (end). Try every
+    address a word in the same bank points at (and 3 / 5 bytes on, as objects
+    keep their place in a script): a walk that ends properly, stays in the
+    bank and whose every code address reads as code gives code entries."""
+    code = cm.code_bytes()
+
+    def walk(bank, start, sp):
+        seen, todo, codes, n, ended = set(), [start], set(), 0, False
+        while todo:
+            a = todo.pop()
+            while True:
+                if a in seen:
+                    ended = True
+                    break
+                if not 0x8000 <= a < 0xBFFB or loc(bank, a) in code:
+                    return None
+                seen.add(a)
+                n += 1
+                if n > 100:
+                    return None
+                b = sp[a]
+                if b in (0x00, 0xFF):
+                    w = sp[a + 1] | sp[a + 2] << 8
+                    if not 0x8000 <= w < 0xC000:
+                        return None
+                    if b == 0xFF:
+                        todo.append(w)
+                        ended = True
+                        break
+                    codes.add(w)
+                    a += 3
+                elif b == 0xFE:
+                    ended = True
+                    break
+                else:
+                    a += 5
+        return codes if ended and codes else None
+
+    found = set()
+    for bank in range(16):
+        sp = Space(cm.rom, bank)
+        refs = set()
+        for x in range(0x8000, 0xBFFF):
+            w = sp[x] | sp[x + 1] << 8
+            if 0x8000 <= w < 0xC000:
+                refs.add(w)
+        for r in refs:
+            for d in (0, 3, 5):
+                c = walk(bank, r + d, sp)
+                if c and all((bank, w) in cm.insns or (_looks_like_code(cm, bank, w, strict=True) and
+                                                         _closure_ok(cm, bank, w)) for w in c):
+                    found.update((bank, w) for w in c)
+    for k in sorted(found):
+        if k not in cm.insns:
+            cm.entries.add(k)
+            cm.add(*k)
 
 
 def bank_entry_tables(cm):

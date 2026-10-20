@@ -102,7 +102,7 @@ DISP_Y0		equ	$3c			; 50 Hz: 313 lines
 	else
 DISP_Y0		equ	$24			; 60 Hz (NTSC timing, as the arcade): 262 lines
 	endif
-COPSIZE		equ	8192
+COPSIZE		equ	5120			; (about 4.1K used)
 PALSECT		equ	8*(1+32)*4		; palette section at the start of each copper list
 TXROWS		equ	28			; arcade text rows 2-29 are visible
 TXSPR_SIZE	equ	16+VIEW_H*16+16		; 64-bit sprite: control, lines, end
@@ -117,7 +117,8 @@ REC_SHIFT	equ	6			; w  shift << 12
 REC_MASK	equ	8			; l  mask (16 words)
 REC_DATA	equ	12			; l  planes 0-3 (16 words each)
 REC_SLOT	equ	16			; w  colour slot
-SAVE_PER	equ	NPLANES*16*4		; background saved under one sprite
+SAVESIZE	equ	24*1024			; background saved under the sprites, per buffer
+SAVE_ROW	equ	NPLANES*4		; ... per line of a sprite
 NBUF		equ	3			; display buffers: shown, queued, being drawn
 MAXBOB		equ	64			; sprites drawn per frame at most
 BMSIZE		equ	PLANEALLOC*NPLANES
@@ -163,6 +164,7 @@ pv_invgen	rs.w	1			; shadows invalidated (forget_pal / forget_all)
 pv_full		rs.b	1			; scan in progress looks at every cell
 		rs.b	1
 pv_srow		rs.w	1			; map row being scanned (wrapped)
+pv_saverows	rs.w	1			; sprite lines planned this frame
 pv_usedacc	rs.l	1			; background palettes on screen
 pv_bstate	rs.b	NBUF*BS_SIZE		; per buffer: what its last scan saw
 pv_layout	rs.w	1			; 0: 64 x 128 tiles, 1: 128 x 64 (port $0E)
@@ -199,7 +201,7 @@ super:
 	lea	chipa(pc),a0		; a3 (bootblock): separate chip RAM block, or 0
 	move.l	a3,d0
 	bne.s	.fast
-	lea	packed(pc),a1
+	lea	z80rom(pc),a1
 	move.l	a1,(a0)
 	lea	bss_end(pc),a1
 	move.l	a1,4(a0)
@@ -277,6 +279,7 @@ PLAT_EI	macro				; enable + deliver a vblank that came while disabled
 	bsr	z80_ei
 	endm
 
+ROM_PRELOADED	equ	1		; (unpack_data copies the fixed ROM)
 	include	"rt_core.s"
 
 ; d0 = port -> d0.b = value. Keeps every other register. (a6 = Z80 memory)
@@ -352,7 +355,7 @@ z80_bad_jump:
 	lea	CUSTOM,a6
 	move.w	#$7fff,DMACON(a6)
 	move.l	d7,d6
-	CHIPB	CB_SAVE0,a0		; one bitplane, 320 x 256
+	CHIPA	CA_SAVE0,a0		; one bitplane, 320 x 256
 	move.w	#40*256/4-1,d0
 .cl	clr.l	(a0)+
 	dbf	d0,.cl
@@ -367,10 +370,10 @@ z80_bad_jump:
 	moveq	#4-1,d1
 	bsr	.hex
 	lea	bad_title(pc),a2
-	CHIPB	CB_SAVE0+40*96+4,a3
+	CHIPA	CA_SAVE0+40*96+4,a3
 	bsr	bad_text
 	lea	bad_where(pc),a2
-	CHIPB	CB_SAVE0+40*128+6,a3
+	CHIPA	CA_SAVE0+40*128+6,a3
 	bsr	bad_text
 	move.w	#$1200,BPLCON0(a6)	; plain lowres, 1 plane
 	clr.w	BPLCON1(a6)
@@ -385,7 +388,7 @@ z80_bad_jump:
 	move.w	#$0b00,COLOR00(a6)
 	move.w	#$0fff,COLOR01(a6)
 	move.w	#$8300,DMACON(a6)	; bitplanes only; the CPU sets the pointer
-	CHIPB	CB_SAVE0,a0
+	CHIPA	CA_SAVE0,a0
 .fr	move.l	VPOSR(a6),d0
 	and.l	#$1ff00,d0
 	cmp.l	#$00200,d0
@@ -559,6 +562,11 @@ lev2:
 ; boot: unpack the graphics and banked ROM (tools/lzpack.py format), make the
 ; sprite masks, clear the display buffers (they reuse the packed data's space)
 unpack_data:
+	lea	z80rom(pc),a0		; fixed ROM -> Z80 $0000-$7FFF (its space is
+	lea	z80mem+$8000(pc),a1	; reused below)
+	move.w	#$8000/4-1,d7
+.rom	move.l	(a0)+,(a1)+
+	dbf	d7,.rom
 	lea	lz_banks(pc),a0
 	lea	z80banks(pc),a1
 	bsr	lz_unpack
@@ -790,9 +798,8 @@ set_buffer:
 	add.l	d0,a0
 	move.l	a0,pv_rec(a4)
 	move.w	pv_back(a4),d0
-	mulu.w	#MAXBOB*SAVE_PER/4,d0
-	lsl.l	#2,d0
-	CHIPB	CB_SAVE0,a0
+	mulu.w	#SAVESIZE,d0
+	CHIPA	CA_SAVE0,a0
 	add.l	d0,a0
 	move.l	a0,pv_save(a4)
 	move.l	(sp)+,d0
@@ -1774,6 +1781,7 @@ draw_bobs:
 	move.l	pv_rec(a4),a2
 	CHIPA	CA_FLIPBUF,a3
 	moveq	#0,d7			; objects
+	clr.w	pv_saverows(a4)
 	moveq	#NSPR-1,d6
 .spr	lea	pv_sprsnap(a4),a0
 	lea	(a0,d6.w*4),a0
@@ -1847,6 +1855,9 @@ draw_bobs:
 	move.l	d0,(a2)+		; REC_DEST
 	move.l	d3,d0
 	swap	d0			; rows
+	add.w	d0,pv_saverows(a4)	; (room to save the background under it?)
+	cmp.w	#SAVESIZE/SAVE_ROW,pv_saverows(a4)
+	bhi	.full
 	move.w	#BUFH,d1
 	sub.w	d5,d1			; lines before the buffer wraps
 	cmp.w	d0,d1
@@ -1878,6 +1889,9 @@ draw_bobs:
 	addq.w	#1,d7
 .next	cmp.w	#2*MAXBOB-1,d7		; (room for MAXBOB sprites)
 	dbhs	d6,.spr
+	bra.s	.planned
+.full	subq.l	#4,a2			; (REC_DEST written already)
+.planned
 	move.w	pv_back(a4),d0
 	lea	pv_nrec(a4),a0
 	move.w	d7,(a0,d0.w*2)
@@ -2336,9 +2350,9 @@ rev_table:	ds.b	256
 
 	include	"game.s"
 
-	cnop	0,8
-z80rom:		incbin	"z80fixed.bin"
 charblank:	incbin	"charblank.bin"
+	cnop	0,8
+z80rom:		incbin	"z80fixed.bin"	; (copied at boot; then display buffers)
 
 ; packed data (tools/lzpack.py), unpacked at boot into the BSS
 	cnop	0,8
@@ -2351,7 +2365,8 @@ packed_end:
 
 ; Chip RAM, in two areas (chipa, chipb). Without fast RAM everything is in
 ; the one chip RAM block the bootblock loads into: area A (display buffers)
-; reuses the packed data's space once it is unpacked, area B follows the BSS.
+; reuses the space of the fixed ROM copy and the packed data once they are
+; unpacked, area B follows the BSS.
 ; With fast RAM the program and its data are there, and both areas are a
 ; separate chip RAM block.
 CA_BITMAP0	equ	16			; NBUF bitmaps
@@ -2361,15 +2376,15 @@ CA_NULLSPR	equ	CA_TXSPR+8*TXSPR_SIZE
 CA_FLIPBUF	equ	CA_NULLSPR+32
 CA_FLIPCACHE	equ	CA_FLIPBUF+MAXBOB*160	; 64 x 160
 CA_FLIPTILE	equ	CA_FLIPCACHE+64*160
-CHIPA_SIZE	equ	CA_FLIPTILE+128
-	ifgt	CHIPA_SIZE-(packed_end-packed)
-	fail	"display buffers don't fit in the packed data's space"
+CA_SAVE0	equ	CA_FLIPTILE+128		; NBUF save areas
+CHIPA_SIZE	equ	CA_SAVE0+NBUF*SAVESIZE
+	ifgt	CHIPA_SIZE-(packed_end-z80rom)
+	fail	"display buffers don't fit in the fixed ROM copy + packed data's space"
 	endif
-CB_BGTILES	equ	0			; blitter sources and the save areas
+CB_BGTILES	equ	0			; blitter sources
 CB_SPRITES	equ	CB_BGTILES+2048*128
 CB_SPRMASK	equ	CB_SPRITES+2048*128
-CB_SAVE0	equ	CB_SPRMASK+2048*32	; NBUF save areas
-CHIPB_SIZE	equ	CB_SAVE0+NBUF*MAXBOB*SAVE_PER
+CHIPB_SIZE	equ	CB_SPRMASK+2048*32
 
 ; BSS: allocated (cleared) by the bootblock right after the loaded file
 	cnop	0,8
