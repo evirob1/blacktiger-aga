@@ -143,7 +143,9 @@ pv_csig		rs.l	NBUF			; per copper list: wrap line << 16 | pv_textver
 pv_shown	rs.w	1			; buffer on screen
 pv_queued	rs.w	1			; buffer on screen from the next vblank (-1: none)
 pv_qdelay	rs.w	1			; ... from the one after that
-pv_txhalf	rs.w	1			; text rows checked this frame: 0 / 14
+pv_txhalf	rs.w	1			; text rows checked this frame: 0, 7, 14, 21
+pv_palhalf	rs.b	1			; palette half checked this frame
+		rs.b	1
 pv_chgend	rs.l	1			; end of chglist
 pv_layout	rs.w	1			; 0: 64 x 128 tiles, 1: 128 x 64 (port $0E)
 pv_cmask	rs.w	1			; map width in tiles - 1
@@ -228,6 +230,10 @@ PLAT_IDLE macro				; let the display run until the next vblank
 	bsr	disp_run
 	endm
 
+PLAT_DI	macro				; (68k) interrupts off
+	ori.w	#$0700,sr
+	endm
+
 PLAT_EI	macro				; enable + deliver a vblank that came while disabled
 	bsr	z80_ei
 	endm
@@ -273,11 +279,14 @@ plat_out:
 	cmp.w	#6,d7
 	bne.s	.x
 	movem.l	d0/a2,-(sp)
+	move.w	sr,-(sp)		; in one piece (the display may run at a vblank)
+	ori.w	#$0700,sr
 	lea	(ZFE00,a6),a2
 	lea	pv_sprbuf(a0),a0
 	moveq	#NSPR-1,d0
 .c	move.l	(a2)+,(a0)+
 	dbf	d0,.c
+	move.w	(sp)+,sr
 	movem.l	(sp)+,d0/a2
 .x	move.l	(sp)+,a0
 	rts
@@ -657,6 +666,10 @@ init_display:
 	addq.w	#1,d0
 	cmp.w	#160,d0
 	bne.s	.ms
+	lea	fliptag(pc),a0		; flip cache empty
+	moveq	#64-1,d0
+.ft	move.l	#$ffff0000,(a0)+
+	dbf	d0,.ft
 	lea	pv_slot_of(a4),a0	; no colour slots given out
 	moveq	#24+16-1,d0
 .ns	st	(a0)+
@@ -873,19 +886,19 @@ read_inputs:
 
 ;------------------------------------------------------------------------------
 ; text layer: arcade rows 2-29 into the sprites. Rows are compared with the
-; shadow copy 4 bytes at a time (half of them each frame); a changed row is
+; shadow copy 4 bytes at a time (a quarter of them each frame); a changed row is
 ; drawn again in full.
 update_text:
 	lea	txshadow(pc),a3
-	move.w	pv_txhalf(a4),d5	; half the rows per frame: 0-13, 14-27
+	move.w	pv_txhalf(a4),d5	; a quarter of the rows per frame
 	move.w	d5,d4
-	add.w	#TXROWS/2,d4
+	add.w	#TXROWS/4,d4
 	cmp.w	#TXROWS,d4
 	blo.s	.h
 	moveq	#0,d4
 .h	move.w	d4,pv_txhalf(a4)
 	move.w	d5,d4
-	add.w	#TXROWS/2,d4		; end
+	add.w	#TXROWS/4,d4		; end
 .row	move.w	d5,d0
 	addq.w	#2,d0
 	lsl.w	#5,d0			; first cell of the row
@@ -1154,9 +1167,7 @@ view_cols:
 
 ; every visible cell: its key (map row, memory column, tile word) against the
 ; shadow; the ones that differ go to chglist (key, shadow offset, memory
-; column, buffer slot). Their palettes -> d5. A row lies in one 4K bank of
-; background RAM; it is read with interrupts off, so the game can't switch
-; that bank in between.
+; column, buffer slot). Their palettes -> d5.
 scan_tiles:
 	moveq	#0,d5
 	lea	chglist(pc),a6
@@ -1164,51 +1175,53 @@ scan_tiles:
 	tst.w	pv_layout(a4)
 	beq.s	.c0
 	lea	256(a0),a0
-.c0	lea	mshoff+2*COLBIAS(pc),a1	; indexed by map column (signed)
-	move.w	pv_cmask(a4),d3
+.c0	move.w	pv_cmask(a4),d3
 	bsr	view_rows
 .row	movem.w	d6-d7,-(sp)
-	move.w	d6,d0
-	and.w	#15,d0
+	moveq	#15,d0
+	and.w	d6,d0
+	move.w	d0,a1			; buffer slot
 	mulu.w	#NCOLSLOT*4,d0
 	move.l	pv_sh(a4),a3
 	add.w	d0,a3			; shadow of the buffer slot
 	bsr	row_off			; (d6 wrapped)
-	move.w	#$2700,sr
-	move.w	d0,d1
-	lsr.w	#8,d1
-	lsr.w	#4,d1			; 4K bank
-	cmp.b	rt_vars+RT_BGBANK(pc),d1
-	beq.s	.live
-	lea	bgram(pc),a2
+	lea	bgram(pc),a2		; (all four banks: the Z80 window isn't used)
 	add.w	d0,a2
-	bra.s	.got
-.live	and.w	#$0fff,d0
-	lea	(ZC000,a5),a2		; the bank the Z80 sees at $C000
-	add.w	d0,a2
-.got	bsr	view_cols
+	bsr	view_cols
 	move.w	d6,d0			; key: row << 24 | memory column << 16 | tile
 	lsl.w	#8,d0
 	move.b	d4,d0
 	add.b	#COLBIAS,d0
 	swap	d0
+	lea	mshoff+2*COLBIAS(pc),a5
+	move.w	(a5,d4.w*2),d2		; shadow offset, then stepped
+	move.w	d4,d1
+	and.w	d3,d1
+	move.w	(a0,d1.w*2),d1		; tile offset in the row, then stepped
 	tst.b	pv_bgoff(a4)
 	bne.s	.off
-.col	move.w	d4,d1
-	and.w	d3,d1
-	move.w	(a0,d1.w*2),d1
-	move.w	(a2,d1.w),d0		; tile word: code << 8 | attribute
-	move.w	(a1,d4.w*2),d2		; shadow offset
+.col	move.w	(a2,d1.w),d0		; tile word: code << 8 | attribute
 	cmp.l	(a3,d2.w),d0
 	bne.s	.chg
-.mk	move.b	d0,d1			; palette in use
-	lsr.b	#3,d1
-	and.w	#15,d1
-	bset	d1,d5
-	add.l	#$10000,d0
-	addq.w	#1,d4
-	dbf	d7,.col
-.rx	move.w	#$2000,sr
+.mk	move.b	d0,d6			; palette in use
+	lsr.b	#3,d6
+	and.w	#15,d6
+	bset	d6,d5
+.nx	add.l	#$10000,d0
+	addq.w	#2,d1
+	addq.w	#4,d2
+	cmp.w	#NCOLSLOT*4,d2
+	bne.s	.s1
+	moveq	#0,d2
+.s1	addq.w	#1,d4
+	moveq	#15,d6			; next block of 16 columns: from the table
+	and.w	d4,d6
+	bne.s	.s2
+	move.w	d4,d1
+	and.w	d3,d1
+	move.w	(a0,d1.w*2),d1
+.s2	dbf	d7,.col
+.rx	lea	z80mem+$8000(pc),a5
 	movem.w	(sp)+,d6-d7
 	addq.w	#1,d6
 	dbf	d7,.row
@@ -1219,22 +1232,23 @@ scan_tiles:
 	bra.s	.mk
 .off	clr.w	d0			; background off: blank cells
 	bset	#31,d0
-.oc	move.w	(a1,d4.w*2),d2
-	cmp.l	(a3,d2.w),d0
+.oc	cmp.l	(a3,d2.w),d0
 	beq.s	.on
 	bsr.s	.add
 .on	add.l	#$10000,d0
-	addq.w	#1,d4
+	addq.w	#4,d2
+	cmp.w	#NCOLSLOT*4,d2
+	bne.s	.o1
+	moveq	#0,d2
+.o1	addq.w	#1,d4
 	dbf	d7,.oc
 	bra.s	.rx
 .add	move.l	d0,(a6)+		; to chglist
 	move.w	d2,(a6)+
-	move.w	d4,d1
-	add.w	#COLBIAS,d1
-	move.w	d1,(a6)+		; memory column
-	moveq	#15,d1
-	and.w	d6,d1
-	move.w	d1,(a6)+		; buffer slot
+	move.w	d4,d6
+	add.w	#COLBIAS,d6
+	move.w	d6,(a6)+		; memory column
+	move.w	a1,(a6)+		; buffer slot
 	rts
 
 ; sprite palettes on screen -> d5, then pv_used (before any slot is given out)
@@ -1597,7 +1611,7 @@ draw_bobs:
 	add.l	d0,a1
 	btst	#3,d1
 	beq.s	.nf
-	bsr	flip_sprite
+	bsr	get_flipped
 .nf	swap	d3			; only the rows with pixels in them
 	moveq	#0,d0
 	move.b	d3,d0
@@ -1668,6 +1682,46 @@ draw_bobs:
 	bsr	blit_bobs
 .x	rts
 
+; d4 = sprite number * 32, a1 = sprite, a0 = its mask -> a1, a0 = x-flipped
+; copies: from the cache of recently flipped sprites (64, by sprite number),
+; else made there - or at a3 (moves on) if that cache entry is in use this
+; frame already
+get_flipped:
+	movem.l	d0-d1/a2,-(sp)
+	move.l	d4,d0
+	lsr.l	#5,d0			; sprite number
+	moveq	#63,d1
+	and.w	d0,d1
+	lea	fliptag(pc),a2
+	lea	(a2,d1.w*4),a2		; tag.w, frame.w
+	cmp.w	(a2),d0
+	beq.s	.hit
+	move.w	2(a2),d0
+	cmp.w	pv_drawn(a4),d0
+	beq.s	.temp			; holds another sprite this frame
+	move.l	d4,d0
+	lsr.l	#5,d0
+	move.w	d0,(a2)
+	move.w	pv_drawn(a4),2(a2)
+	move.l	a3,-(sp)
+	mulu.w	#160,d1
+	lea	flipcache(pc),a3
+	add.l	d1,a3
+	bsr	flip_sprite
+	move.l	(sp)+,a3
+	bra.s	.x
+.hit	move.w	pv_drawn(a4),2(a2)
+	mulu.w	#160,d1
+	lea	flipcache(pc),a1
+	add.l	d1,a1
+	lea	128(a1),a0
+	bra.s	.x
+.temp	bsr	flip_sprite
+.x	movem.l	(sp)+,d0-d1/a2
+	rts
+
+fliptag:	ds.l	64		; flip cache: sprite number, frame last used
+
 ; a1 = sprite (4 planes x 16 words), a0 = its mask -> x-flipped copies at a3
 ; (a1, a0 then point at them; a3 moves on)
 flip_sprite:
@@ -1712,12 +1766,16 @@ COPMOVE	macro
 update_palette:
 	lea	palshadow(pc),a3
 	moveq	#0,d2			; anything changed?
+	not.b	pv_palhalf(a4)		; half of it each frame
+	beq.s	.h2
 	lea	(ZD800,a5),a0		; background, low bytes
 	moveq	#64-1,d1
 	bsr.s	.cmp
 	lea	(ZDC00,a5),a0		; background, high bytes
 	moveq	#64-1,d1
 	bsr.s	.cmp
+	bra.s	.hx
+.h2	lea	512(a3),a3
 	lea	(ZDA00,a5),a0		; sprites
 	moveq	#32-1,d1
 	bsr.s	.cmp
@@ -1736,7 +1794,7 @@ update_palette:
 	lea	(ZDFFC,a5),a0
 	moveq	#0,d1
 	bsr.s	.cmp
-	tst.w	d2
+.hx	tst.w	d2
 	bne.s	.recalc
 	rts
 .cmp	cmpm.l	(a0)+,(a3)+
@@ -2089,7 +2147,8 @@ txspr		equ	coplist0+NBUF*COPSIZE
 nullspr		equ	txspr+8*TXSPR_SIZE
 rec0		equ	nullspr+32		; NBUF object lists
 flipbuf		equ	rec0+NBUF*RECSIZE
-fliptile	equ	flipbuf+MAXBOB*160
+flipcache	equ	flipbuf+MAXBOB*160	; 64 x 160
+fliptile	equ	flipcache+64*160
 reuse_end	equ	fliptile+128
 	ifgt	reuse_end-packed_end
 	fail	"display buffers don't fit in the packed data's space"

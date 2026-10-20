@@ -69,8 +69,26 @@ static unsigned int custom_read(unsigned int reg)
    from data/bank_reads.txt (printed as STALE <68k offset>, once each) */
 static unsigned int stale_seen[4096];
 static int stale_n;
+/* the Z80 image's background RAM window $C000-$CFFF is unused (translated
+   code addresses the current bank in bgram): print each instruction (68k
+   offset) that touches it anyway, once - a site missing from data/bg_stores.txt */
+static unsigned int bg_seen[8192];
+static int bg_n, bgsites = -1;
+static void bg_check(unsigned int a)
+{
+    if (bgsites < 0) bgsites = 1;
+    if (!bgsites || !z80mem_off) return;
+    unsigned int w = BASE + z80mem_off + 0x4000;
+    if (a < w || a >= w + 0x1000) return;
+    unsigned int pc = m68k_get_reg(NULL, M68K_REG_PPC) - BASE;
+    for (int i = 0; i < bg_n; i++) if (bg_seen[i] == pc) return;
+    if (bg_n < 8192) bg_seen[bg_n++] = pc;
+    printf("BGSTALE %x\n", pc);
+}
+
 static void stale_check(unsigned int a)
 {
+    bg_check(a);
     if (!z80mem_off) return;
     unsigned int w = BASE + z80mem_off;
     if (a < w || a >= w + 0x4000) return;
@@ -179,6 +197,7 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
 {
     a &= 0xffffff;
     waitd(a);
+    bg_check(a);
     if (a >= 0xdff000 && a < 0xdff200) return;
     if (a >= 0xbfd000 && a < 0xbff000) return;
     mem[a] = v;
@@ -187,6 +206,7 @@ void m68k_write_memory_16(unsigned int a, unsigned int v)
 {
     a &= 0xffffff;
     waitd(a);
+    bg_check(a);
     if (a >= 0xdff000 && a < 0xdff200) { custom_write(a, v); return; }
     mem[a] = v >> 8;
     mem[a + 1] = v;
@@ -207,13 +227,25 @@ static unsigned long long next_vbl = 283750;
 static int vbl_due;
 
 static unsigned int indisp_addr;          /* BT_INDISP: pv_indisp, the display context runs */
-static unsigned long long disp_cycles, hook_last;
+static unsigned long long disp_cycles, hook_last, disp_clock;   /* disp_clock: display time only */
+
+/* scheduler idle loop (rt_header +24..+28) and BT_ROUTINE=start,end: time spent */
+static unsigned int idle_lo, idle_hi, rt_start, rt_end;
+static unsigned long long idle_cycles, rt_cycles, rt_t0, rt_calls, idle_last;
+static int in_rt;
 
 void harness_hook(unsigned int pc)
 {
+    {
+        unsigned long long t = T();
+        if (idle_lo && pc >= idle_lo && pc < idle_hi && !(indisp_addr && mem[indisp_addr])) idle_cycles += t - idle_last;
+        idle_last = t;
+        if (rt_start && pc == rt_start && !in_rt) { in_rt = 1; rt_t0 = t; rt_calls++; }
+        else if (in_rt && pc == rt_end) { in_rt = 0; rt_cycles += t - rt_t0; }
+    }
     if (indisp_addr) {
         unsigned long long t = T();
-        if (mem[indisp_addr]) disp_cycles += t - hook_last;
+        if (mem[indisp_addr]) { disp_cycles += t - hook_last; disp_clock += t - hook_last; }
         hook_last = t;
     }
     /* the vertical blank arrives at its exact cycle, between any two instructions */
@@ -225,7 +257,7 @@ void harness_hook(unsigned int pc)
     }
     for (int i = 0; i < nprobes; i++)
         if (pc == probes[i]) {
-            unsigned long long t = T();
+            unsigned long long t = indisp_addr ? disp_clock : T();   /* (display probes: its own time) */
             if (last_probe >= 0 && i == last_probe + 1) { probe_sum[last_probe] += t - probe_t; probe_n[last_probe]++; }
             last_probe = i;
             probe_t = t;
@@ -309,6 +341,13 @@ int main(int argc, char **argv)
     }
     if (getenv("BT_BLIT_CYC")) BLIT_CYC = atoi(getenv("BT_BLIT_CYC"));
     if (getenv("BT_CHIPWAIT")) chipwait = atoi(getenv("BT_CHIPWAIT"));
+    idle_lo = hdr + rd32(hdr + 24);
+    idle_hi = hdr + rd32(hdr + 28);
+    if (getenv("BT_ROUTINE")) {
+        char *p = getenv("BT_ROUTINE");
+        rt_start = BASE + (unsigned int)strtoul(p, &p, 16);
+        if (*p == ',') rt_end = BASE + (unsigned int)strtoul(p + 1, NULL, 16);
+    }
     if (getenv("BT_FASTRAM")) fast_from = (unsigned int)strtoul(getenv("BT_FASTRAM"), NULL, 16);
     if (getenv("BT_INDISP")) indisp_addr = BASE + (unsigned int)strtoul(getenv("BT_INDISP"), NULL, 16);
     m68k_init();
@@ -353,6 +392,10 @@ int main(int argc, char **argv)
                        (drawn - last_drawn) & 0xffff, m68k_get_reg(NULL, M68K_REG_PC) - BASE);
                 disp_cycles = 0;
                 last_drawn = drawn;
+                printf("  idle %.0f%%", 100.0 * idle_cycles / ((double)FPS * FRAME));
+                if (rt_start) printf(", routine %.0f%% (%llu calls)", 100.0 * rt_cycles / ((double)FPS * FRAME), rt_calls);
+                printf("\n");
+                idle_cycles = rt_cycles = rt_calls = 0;
                 if (getenv("BT_OVL")) {
                     static unsigned int last_ovl;
                     unsigned int o = rd16(BASE + (unsigned int)strtoul(getenv("BT_OVL"), NULL, 16));

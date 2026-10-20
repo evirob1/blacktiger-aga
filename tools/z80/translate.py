@@ -79,6 +79,15 @@ class Translator:
     def __init__(self, rom, cm, out, cycles=False, bank_sites=()):
         self.rom, self.cm, self.out = rom, cm, out
         self.bank_sites = set(bank_sites)
+        # stores into the background RAM window $C000-$CFFF (data/bg_stores.txt,
+        # found by tools/harness/amiga_sim's BGSTALE report): base chosen at run time
+        self.bg_stores = set()
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "bg_stores.txt")
+        if os.path.exists(path):
+            for line in open(path):
+                f = line.split()
+                if f and not line.startswith("#"):
+                    self.bg_stores.add((None if f[0] == "ff" else int(f[0], 16), int(f[1], 16)))
         self.cycles = cycles      # test build: count Z80 T-states in a5, mark boundaries
         self.uid = 0
         self.problems = []
@@ -144,12 +153,15 @@ class Translator:
                                                         "move.w d7,ccr"], False
         return body(reg), False
 
-    def select_base(self, reg):
-        """a0 = a1 (current bank) if the Z80 address in reg is in $8000-$BFFF,
-        else a6. Keeps the CCR."""
-        s = self.tmp()
-        return ["movea.w %s,a0" % reg, "cmpa.w #-$4000,a0", "movea.l a6,a0",
-                "bge.s %s" % s, "movea.l a1,a0", s + ":"]
+    def select_base(self, reg, into="a0"):
+        """into = the base for the Z80 address in reg: a1 (current ROM bank)
+        for $8000-$BFFF, the current background RAM bank (RT_BGPTR) for
+        $C000-$CFFF, else a6. Keeps the CCR."""
+        s, t = self.tmp(), self.tmp()
+        return ["movea.w %s,%s" % (reg, into), "cmpa.w #-$3000,%s" % into, "bge.s %s" % s,
+                "cmpa.w #-$4000,%s" % into, "movea.l a1,%s" % into, "blt.s %s" % t,
+                "movea.l RT_BGPTR(a4),%s" % into, "bra.s %s" % t,
+                s + ":", "movea.l a6,%s" % into, t + ":"]
 
     def static_bank_read(self, key, ins):
         """Reads that may hit the banked window without being seen in MAME:
@@ -170,7 +182,7 @@ class Translator:
         if op not in ("ld", "add", "adc", "sub", "sbc", "and", "xor", "or", "cp", "bit"):
             self.problems.append("%s: bank read by '%s' not handled" % (label(*key), ins.text))
             return t
-        if op == "ld" and not ins.text.split(",", 1)[1].startswith("("):
+        if op == "ld" and not ins.text.split(",", 1)[1].startswith("(") and key not in self.bg_stores:
             self.problems.append("%s: bank read site is a store? (%s)" % (label(*key), ins.text))
             return t
         for i, l in enumerate(t.lines):
@@ -407,14 +419,18 @@ class Translator:
 
         # ---- block ops, I/O
         if op in ("ldir", "lddr"):
+            # source and destination bases chosen once (a2 = DE' meanwhile on the stack)
             s = self.tmp()
             q = "addq" if op == "ldir" else "subq"
-            return T(self.select_base("d3") + [s + ":", "move.b (a0,d3.w),(a6,d2.w)",
-                      "%s.w #1,d3" % q, "%s.w #1,d2" % q, "subq.w #1,d1", "bne.s %s" % s],
+            return T(["move.l a2,-(sp)"] + self.select_base("d2", "a2") + self.select_base("d3") +
+                     [s + ":", "move.b (a0,d3.w),(a2,d2.w)",
+                      "%s.w #1,d3" % q, "%s.w #1,d2" % q, "subq.w #1,d1", "bne.s %s" % s,
+                      "movea.l (sp)+,a2"],
                      defs=V, ok=0, clob=ALL)
         if op in ("ldi", "ldd"):
             q = "addq" if op == "ldi" else "subq"
-            return T(self.select_base("d3") + ["move.b (a0,d3.w),(a6,d2.w)", "%s.w #1,d3" % q,
+            return T(["move.l a2,-(sp)"] + self.select_base("d2", "a2") + self.select_base("d3") +
+                     ["move.b (a0,d3.w),(a2,d2.w)", "movea.l (sp)+,a2", "%s.w #1,d3" % q,
                       "%s.w #1,d2" % q, "subq.w #1,d1"], defs=V, ok=0, clob=ALL)
         if op in ("cpir", "cpdr", "cpi", "cpd", "ini", "ind", "inir", "indr", "outi", "outd",
                   "otir", "otdr", "rld", "rrd"):
@@ -476,7 +492,7 @@ class Translator:
             else:
                 trs[key] = self.tr(key[0], ins, None)
                 if ins.text not in ("ldir", "lddr", "ldi", "ldd") and (
-                        key in self.bank_sites or self.static_bank_read(key, ins)):
+                        key in self.bank_sites or key in self.bg_stores or self.static_bank_read(key, ins)):
                     trs[key] = self.bank_aware(key, ins, trs[key])
         daa_keys = set(fused.values())
         for k in daa_keys:

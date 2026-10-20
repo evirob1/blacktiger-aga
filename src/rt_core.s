@@ -41,7 +41,8 @@ RT_ALT_A	equ	4	; b  A'
 RT_ALT_F	equ	6	; w  F' (as a 68k CCR)
 RT_TASK_SP	equ	8	; 16 x l  68k stack of each sleeping task
 RT_ALT_BC	equ	72	; w  BC'
-RT_SIZE		equ	74
+RT_BGPTR	equ	74	; l  bgram + bank * $1000 + $4000: (RT_BGPTR, Z80 address.w)
+RT_SIZE		equ	78
 
 ;------------------------------------------------------------------------------
 ; header: entry points and data offsets for the loaders
@@ -67,6 +68,8 @@ rt_init:
 	dbf	d7,.rom
 	moveq	#0,d0
 	bsr	set_bank
+	moveq	#0,d0
+	bsr	set_bg_bank
 	sub.l	a5,a5
 	sf	RT_IE(a4)
 	lea	sched_stack_top(pc),sp
@@ -283,29 +286,17 @@ set_bank:
 
 ; background RAM bank: the Z80 sees one 4K bank of 16K at $C000
 set_bg_bank:
-	movem.l	d0/d7/a0-a2,-(sp)
+	; The Z80's $C000-$CFFF window is not kept in its memory image: every
+	; translated access to it goes to the current bank in bgram (RT_BGPTR)
+	movem.l	d0/a0,-(sp)
 	and.w	#3,d0
-	moveq	#0,d7
-	move.b	RT_BGBANK(a4),d7
-	cmp.b	d7,d0
-	beq.s	.same
 	move.b	d0,RT_BGBANK(a4)
-	lea	bgram(pc),a1
-	lsl.w	#8,d7
-	lsl.w	#4,d7
-	lea	(a1,d7.w),a2		; old bank: window -> bgram
-	lea	(ZC000,a6),a0
-	move.w	#$1000/4-1,d7
-.out	move.l	(a0)+,(a2)+
-	dbf	d7,.out
 	lsl.w	#8,d0
 	lsl.w	#4,d0
-	lea	(a1,d0.w),a2		; new bank: bgram -> window
-	lea	(ZC000,a6),a0
-	move.w	#$1000/4-1,d7
-.in	move.l	(a2)+,(a0)+
-	dbf	d7,.in
-.same	movem.l	(sp)+,d0/d7/a0-a2
+	lea	bgram+$4000(pc),a0
+	add.w	d0,a0
+	move.l	a0,RT_BGPTR(a4)
+	movem.l	(sp)+,d0/a0
 	rts
 
 ;------------------------------------------------------------------------------

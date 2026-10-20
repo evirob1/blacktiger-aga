@@ -39,7 +39,6 @@ def main():
     pvb = lambda name, i=0: mem[pv + s[name] + i]
     pvw = lambda name: (mem[pv + s[name]] << 8 | mem[pv + s[name] + 1])
     bgram = BASE + s["bgram"]
-    bgbank = mem[BASE + s["rt_vars"] + 1]
     rom = bt_rom.load_roms("roms/blktiger.zip")
     tiles = bt_rom.decode_16x16(rom["tiles"])
     sprites = bt_rom.decode_16x16(rom["sprites"])
@@ -71,10 +70,7 @@ def main():
                     off = ((c & 15) + ((c & 0x70) << 4)) * 2 + (r & 15) * 32 + ((r & 0x30) << 8)
                 else:
                     off = ((c & 15) + ((c & 0x30) << 4)) * 2 + (r & 15) * 32 + ((r & 0x70) << 7)
-                if off >> 12 == bgbank:
-                    code, attr = zb(0xC000 + (off & 0xFFF)), zb(0xC001 + (off & 0xFFF))
-                else:
-                    code, attr = mem[bgram + off], mem[bgram + off + 1]
+                code, attr = mem[bgram + off], mem[bgram + off + 1]   # (all banks)
                 t = tiles[code | (attr & 7) << 8]
                 tx, ty = mx & 15, my & 15
                 if attr & 0x80:

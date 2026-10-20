@@ -14,6 +14,7 @@
 -- to be reproducible themselves.
 
 local FRAMES = tonumber(os.getenv("BT_FRAMES") or "3000")
+local COIN = tonumber(os.getenv("BT_COIN") or "2400")   -- frame of the first coin
 local out = "analysis/rec/"
 os.execute("mkdir -p " .. out)
 local io_log = io.open(out .. "io.txt", "w")
@@ -69,11 +70,12 @@ end
 math.randomseed(1987)
 emu.register_frame_done(function()
   f = f + 1
-  if f == 2400 then set(":IN0", "Coin 1", 1) end
-  if f == 2410 then set(":IN0", "Coin 1", 0) end
-  if f == 2500 then set(":IN0", "1 Player Start", 1) end
-  if f == 2510 then set(":IN0", "1 Player Start", 0) end
-  if f > 2600 and f % 20 == 0 then
+  local g = f - COIN                  -- coin + start, again every 3000 frames
+  if g >= 0 and g % 3000 == 0 then set(":IN0", "Coin 1", 1) end
+  if g >= 0 and g % 3000 == 10 then set(":IN0", "Coin 1", 0) end
+  if g >= 0 and g % 3000 == 100 then set(":IN0", "1 Player Start", 1) end
+  if g >= 0 and g % 3000 == 110 then set(":IN0", "1 Player Start", 0) end
+  if g > 200 and f % 20 == 0 then
     for _, n in ipairs({"P1 Left", "P1 Up", "P1 Down", "P1 Button 1", "P1 Button 2"}) do
       set(":IN1", n, (math.random() < 0.3) and 1 or 0)
     end

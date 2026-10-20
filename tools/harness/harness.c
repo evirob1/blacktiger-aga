@@ -75,8 +75,6 @@ static void compare(int vbl)
     }
     for (i = 0; i < 0x2000; i++) cur[i] = mem[z80(0xe000 + i)];
     memcpy(cur + 0x2000, mem + BASE + bgram_off, 0x4000);
-    int bank = mem[BASE + vars_off + 1] & 3;
-    for (i = 0; i < 0x1000; i++) cur[0x2000 + bank * 0x1000 + i] = mem[z80(0xc000 + i)];
     for (i = 0; i < 0x1000; i++) cur[0x6000 + i] = mem[z80(0xd000 + i)];
     for (i = 0; i < REC_SIZE; i++) {
         int a = i < 0x2000 ? 0xe000 + i : -1;
@@ -142,6 +140,23 @@ static int stale_reads;
 static unsigned int stale_pcs[4096];
 static int stale_n;
 
+/* the Z80 image's $C000-$CFFF is not used either: translated accesses go to
+   the current background RAM bank in bgram. Any other access is a missing
+   site (data/bg_stores.txt): redirected, noted (BGSTALE) and failed. */
+static unsigned int bgst_pcs[1024];
+static int bgst_n, bgst_count;
+static unsigned int bg_redirect(unsigned int a)
+{
+    unsigned int w = BASE + z80mem_off + 0x4000;
+    if (a < w || a >= w + 0x1000) return a;
+    unsigned int pc = m68k_get_reg(NULL, M68K_REG_PPC) - BASE;
+    int k;
+    for (k = 0; k < bgst_n && bgst_pcs[k] != pc; k++) ;
+    if (k == bgst_n && bgst_n < 1024) bgst_pcs[bgst_n++] = pc;
+    bgst_count++;
+    return BASE + bgram_off + (mem[BASE + vars_off + 1] & 3) * 0x1000 + (a - w);
+}
+
 static int stale_fix(unsigned int a, unsigned int *v, int size)
 {
     unsigned int w = BASE + z80mem_off;
@@ -172,10 +187,10 @@ unsigned int m68k_read_memory_8(unsigned int a)
     }
     unsigned int v;
     if (stale_fix(a, &v, 1)) return v;
-    return rd8(a);
+    return rd8(bg_redirect(a));
 }
-unsigned int m68k_read_memory_16(unsigned int a) { unsigned int v; return stale_fix(a, &v, 2) ? v : rd16(a); }
-unsigned int m68k_read_memory_32(unsigned int a) { unsigned int v; return stale_fix(a, &v, 4) ? v : rd32(a); }
+unsigned int m68k_read_memory_16(unsigned int a) { unsigned int v; return stale_fix(a, &v, 2) ? v : m68k_read_memory_8(a) << 8 | m68k_read_memory_8(a + 1); }
+unsigned int m68k_read_memory_32(unsigned int a) { unsigned int v; return stale_fix(a, &v, 4) ? v : m68k_read_memory_16(a) << 16 | m68k_read_memory_16(a + 2); }
 unsigned int m68k_read_disassembler_16(unsigned int a) { return rd16(a); }
 unsigned int m68k_read_disassembler_32(unsigned int a) { return rd32(a); }
 
@@ -193,7 +208,7 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
         return;
     }
     if (a == BASE + vars_off + RT_IE) armed = 0;       /* di or ei */
-    mem[a & (MEMSIZE - 1)] = v;
+    mem[bg_redirect(a) & (MEMSIZE - 1)] = v;
 }
 void m68k_write_memory_16(unsigned int a, unsigned int v)
 {
@@ -298,6 +313,12 @@ int main(int argc, char **argv)
         for (unsigned int i = 0; i < (1 << 22); i++)
             if (pc_cyc[i]) fprintf(pf, "%x %u\n", i, pc_cyc[i]);
         fclose(pf);
+    }
+    if (bgst_n) {
+        printf("%d accesses to the background RAM window from %d places (data/bg_stores.txt is incomplete):\n",
+               bgst_count, bgst_n);
+        for (int k = 0; k < bgst_n; k++) printf("BGSTALE %x\n", bgst_pcs[k]);
+        failed = 1;
     }
     if (stale_n) {
         printf("%d reads of the unfilled bank window from %d places (data/bank_reads.txt is incomplete):\n",

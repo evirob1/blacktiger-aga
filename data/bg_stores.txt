@@ -1,0 +1,10 @@
+# Z80 instructions that store into the background RAM window $C000-$CFFF
+# (bank selected by out ($0D)) other than block moves. They address the
+# current bank in bgram directly; tools/harness/amiga_sim reports others
+# as BGSTALE. Format: bank (ff = fixed ROM), address.
+ff 090d  ld (hl),$00
+ff 091f  ld (hl),$00
+ff 0931  ld (hl),$00
+ff 0943  ld (hl),$00
+ff 2af7  ld (de),a
+ff 2afb  ld (de),a

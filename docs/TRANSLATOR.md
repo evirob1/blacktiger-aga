@@ -71,10 +71,15 @@ in MAME by `tools/mame/bank_reads.sh`) by checking their pointer at run time.
 The test harness leaves the Z80 image's bank window unfilled and reports any
 other read of it, so a missing site can't go unnoticed in testing.
 
-**Video RAM** (`$C000`–`$FFFF`) is plain memory. The runtime diffs it each
+**Video RAM** (`$D000`–`$FFFF`) is plain memory. The runtime diffs it each
 frame against a shadow copy to find changed tiles, characters and colours.
-The background RAM window (4 × 4K banks behind `$C000`) is swapped on
-`out ($0D)`.
+The background RAM window (4 × 4K banks behind `$C000`, selected by
+`out ($0D)`) is not kept in the memory image at all: the run-time base
+selection that pointer reads already do for the ROM window also sends
+`$C000`–`$CFFF` to the current bank in `bgram` (`RT_BGPTR`), block moves pick
+their source and destination bases that way, and the few stores into the
+window (`data/bg_stores.txt`) do the same. A bank switch only sets a pointer.
+The test harness and `amiga_sim` report any other access to the window.
 
 ## Flags
 
@@ -162,8 +167,8 @@ build/harness build/harness_game.bin analysis/rec/io.txt analysis/rec/ram.bin
 `tools/harness/cmp_trace.py` lines that up with a MAME `trace` (with
 `totalcycles`) and reports where the timing differs.
 
-**Status:** a 3,000-frame recording (attract mode, coin, start, random play)
-matches MAME byte for byte at every frame.
+**Status:** a 6,000-frame recording (a little attract mode, then games with
+random play) matches MAME byte for byte at every frame.
 
 ## Speed
 
@@ -174,5 +179,5 @@ timings (no chip RAM wait states), and writes `build/profile.txt`.
 Over the 3,000-frame recording: mean 18,500, median 3,300, 90th percentile
 54,000, 99th 110,000, worst 219,000 cycles per frame. A PAL frame on a 14 MHz
 68020 is ~283,000 cycles, so the game logic should leave most of the frame for
-rendering even with chip RAM wait states. Biggest remaining costs: background
-RAM bank switching (21%, 2 × 4K copy) and the computed-jump lookup (5%).
+rendering even with chip RAM wait states. (Background RAM bank switching,
+once 21% as a 2 × 4K copy, is now a pointer change.)
