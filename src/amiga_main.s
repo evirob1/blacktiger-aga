@@ -165,6 +165,12 @@ pv_full		rs.b	1			; scan in progress looks at every cell
 		rs.b	1
 pv_srow		rs.w	1			; map row being scanned (wrapped)
 pv_saverows	rs.w	1			; sprite lines planned this frame
+pv_cheat	rs.b	1			; test mode (Help key): no damage, lives, time
+pv_helpkey	rs.b	1			; Help key held last frame
+pv_cvit		rs.b	1			; test mode: vitality / lives kept at least at these
+pv_clives	rs.b	1
+pv_ctime	rs.w	1			; time (minutes << 8 | seconds, BCD)
+pv_ctick	rs.w	1			; frames since the time last changed
 pv_usedacc	rs.l	1			; background palettes on screen
 pv_bstate	rs.b	NBUF*BS_SIZE		; per buffer: what its last scan saw
 pv_layout	rs.w	1			; 0: 64 x 128 tiles, 1: 128 x 64 (port $0E)
@@ -817,6 +823,7 @@ vblank_quick:
 	lea	pvars(pc),a4
 	lea	CUSTOM,a6
 	bsr	read_inputs
+	bsr	test_mode
 	move.w	pv_queued(a4),d0
 	bmi.s	.n
 	tst.w	pv_qdelay(a4)
@@ -934,6 +941,64 @@ read_inputs:
 	bclr	#7,d1
 .c2	move.b	d1,pv_in0(a4)
 	rts
+
+;------------------------------------------------------------------------------
+; Test mode, toggled with the Help key (the power LED dims while it is on):
+; the player's vitality, lives and time never go down. Black Tiger's RAM:
+	Z80	ZF3A0,$f3a0		; lives
+	Z80	ZF3AD,$f3ad		; vitality (hits left)
+	Z80	ZF3B1,$f3b1		; time: seconds, BCD
+	Z80	ZF3B2,$f3b2		; minutes
+test_mode:
+	lea	z80mem+$8000(pc),a0
+	tst.b	pv_keys+$5f(a4)		; Help: toggle on press
+	sne	d0
+	move.b	pv_helpkey(a4),d1
+	move.b	d0,pv_helpkey(a4)
+	not.b	d1
+	and.b	d1,d0
+	beq.s	.on
+	not.b	pv_cheat(a4)
+	move.b	(ZF3AD,a0),pv_cvit(a4)	; from the values now
+	move.b	(ZF3A0,a0),pv_clives(a4)
+	move.b	(ZF3B2,a0),d0
+	lsl.w	#8,d0
+	move.b	(ZF3B1,a0),d0
+	move.w	d0,pv_ctime(a4)
+	bclr	#1,CIAA_PRA		; LED on (bright)
+	tst.b	pv_cheat(a4)
+	beq.s	.on
+	bset	#1,CIAA_PRA		; LED dim: test mode
+.on	tst.b	pv_cheat(a4)
+	beq.s	.x
+	move.b	(ZF3AD,a0),d0		; vitality: back up to the highest seen
+	cmp.b	pv_cvit(a4),d0
+	bhs.s	.v
+	move.b	pv_cvit(a4),(ZF3AD,a0)
+	bra.s	.l
+.v	move.b	d0,pv_cvit(a4)
+.l	move.b	(ZF3A0,a0),d0		; lives
+	cmp.b	pv_clives(a4),d0
+	bhs.s	.l2
+	move.b	pv_clives(a4),(ZF3A0,a0)
+	bra.s	.t
+.l2	move.b	d0,pv_clives(a4)
+.t	move.b	(ZF3B2,a0),d0		; time: the once a second tick is undone
+	lsl.w	#8,d0			; (not the fast count into the bonus at the
+	move.b	(ZF3B1,a0),d0		; end of a level)
+	addq.w	#1,pv_ctick(a4)
+	cmp.w	pv_ctime(a4),d0
+	beq.s	.x
+	bhi.s	.t2
+	cmp.w	#30,pv_ctick(a4)
+	blo.s	.t2
+	move.b	pv_ctime(a4),(ZF3B2,a0)
+	move.b	pv_ctime+1(a4),(ZF3B1,a0)
+	clr.w	pv_ctick(a4)
+	rts
+.t2	move.w	d0,pv_ctime(a4)
+	clr.w	pv_ctick(a4)
+.x	rts
 
 ;------------------------------------------------------------------------------
 ; text layer: arcade rows 2-29 into the sprites. Rows are compared with the
