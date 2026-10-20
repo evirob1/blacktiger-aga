@@ -47,8 +47,14 @@ The disk images are written to `build/viewer_level1.adf` … `viewer_level8.adf`
 The translated game itself:
 
 ```
-python tools/build_game.py       -> build/blacktiger.adf
+python tools/build_game.py       -> build/blacktiger.adf (60 Hz, like the arcade)
+python tools/build_game.py --pal -> 50 Hz version
 ```
+
+The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
+arcade's own frame rate: the game runs at the original speed. That needs a
+display that accepts 60 Hz (any 15 kHz arcade monitor or most TVs; WinUAE
+handles it). The `--pal` disk stays at 50 Hz, so the game runs at 5/6 speed.
 
 Controls: joystick in port 2 (fire = attack, second button or Space = jump,
 or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,

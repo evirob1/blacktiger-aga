@@ -11,7 +11,7 @@ import sys
 from PIL import Image
 
 BASE = 0x10000
-DISP_Y0, H, W = 0x3c, 224, 256
+H, W = 224, 256
 
 
 def sym(name):
@@ -23,6 +23,11 @@ def sym(name):
 
 
 def main():
+    global DISP_Y0
+    try:
+        DISP_Y0 = sym("DISP_Y0")
+    except KeyError:
+        DISP_Y0 = 0x3c
     mem = open(sys.argv[1], "rb").read()
     w16 = lambda a: mem[a] << 8 | mem[a + 1]
     cop = int.from_bytes(mem[BASE + sym("coplist_ptr"):][:4], "big")

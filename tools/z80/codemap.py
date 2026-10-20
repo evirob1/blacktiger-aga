@@ -358,6 +358,7 @@ def static_tables(cm):
                 found.append((tkey, bank))
         if not found:
             return
+        code = cm.code_bytes()
         for (tb, ta), bank in found:
             if tb is None:
                 bank = None             # a table in the fixed ROM points into the fixed ROM
@@ -370,7 +371,11 @@ def static_tables(cm):
                 w = sp[a] | sp[a + 1] << 8
                 if w in (0, 0xFFFF) or not (w < 0x8000 or (bank is not None and w < 0xC000)):
                     break
+                if entries and (w < 0x8000) != (entries[0][1] < 0x8000):
+                    break                                   # left the region of the first entry
                 k = loc(bank, w)
+                if k not in cm.insns and k in code:
+                    break                                   # into the middle of an instruction
                 if k not in cm.insns and not _looks_like_code(cm, k[0], w):
                     break
                 entries.append(k)
@@ -383,9 +388,9 @@ def static_tables(cm):
 def data_pointers(cm):
     """Code addresses kept in data (object scripts and the like): a word
     outside the known code that points at the address right after a known
-    unconditional jp / jr / ret, where the code map has nothing yet (code that
-    can't be fallen into, so only reached through a pointer), and that decodes
-    as code. Banked data is searched for pointers into its own bank, the fixed
+    unconditional jp / jr / ret or a known jump table, where the code map has
+    nothing yet (code that can't be fallen into, so only reached through a
+    pointer), and that decodes as code. Banked data is searched for pointers into its own bank, the fixed
     ROM for pointers into the fixed ROM. Repeats while new code turns up."""
     banks = [None] + list(range(16))
     while True:
@@ -394,6 +399,8 @@ def data_pointers(cm):
         for (b, a), ins in cm.insns.items():
             if ins.cond is None and ins.kind in ("jp", "jr", "ret", "reti"):
                 ends.add(loc(b, a + ins.length))
+        for (tb, ta), entries in cm.tables.items():    # ... or after a jump table
+            ends.add((tb, ta + 2 * len(entries)))
         found = set()
         for bank in banks:
             sp = Space(cm.rom, bank)

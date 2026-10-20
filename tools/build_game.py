@@ -1,7 +1,7 @@
 """Build the Black Tiger AGA game disk from your own MAME ROM set.
 
 usage:  python tools/build_game.py [--roms roms/blktiger.zip]
-Output: build/blacktiger.adf
+Output: build/blacktiger.adf (60 Hz; --pal for 50 Hz)
 
 Needs Python 3 and vasmm68k_mot (on the PATH, or VASM=path).
 """
@@ -34,6 +34,8 @@ def listing_symbol(lst, name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--roms", default=os.path.join(ROOT, "roms", "blktiger.zip"))
+    ap.add_argument("--pal", action="store_true",
+                    help="50 Hz display (default: 60 Hz like the arcade, NTSC timing)")
     a = ap.parse_args()
     out = os.path.join(ROOT, "build", "game")
     os.makedirs(out, exist_ok=True)
@@ -66,7 +68,7 @@ def main():
     payload = os.path.join(out, "game.bin")
     lst = os.path.join(out, "game.lst")
     build.assemble(os.path.join(ROOT, "src", "amiga_main.s"), payload,
-                   incdir=out, extra=["-I" + os.path.join(ROOT, "src"), "-L", lst])
+                   incdir=out, extra=["-I" + os.path.join(ROOT, "src"), "-L", lst] + (["-DPAL=1"] if a.pal else []))
     at = listing_symbol(lst, "bss_size")
     bss = int.from_bytes(open(payload, "rb").read()[at:at + 4], "big")
     mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"))

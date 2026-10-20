@@ -18,7 +18,8 @@
 #define MEMSIZE 0x01000000
 #define BASE    0x00010000
 #define EXEC    0x00008000
-#define FRAME   283750
+static unsigned long long FRAME = 283750;  /* PAL; NTSC timing (BEAMCON0 = 0): 262 lines */
+#define FPS (FRAME == 283750 ? 50 : 60)
 
 static unsigned char mem[MEMSIZE];
 static unsigned int z80mem_off, vars_off;
@@ -134,6 +135,7 @@ static void blit(void)
 static void custom_write(unsigned int reg, unsigned int v)
 {
     blt[(reg & 0x1fe) / 2] = v;
+    if ((reg & 0x1fe) == 0x1dc && !(v & 0x20)) FRAME = 262ULL * 227 * 4;
     if ((reg & 0x1fe) == 0x058) blit();
     if ((reg & 0x1fe) == 0x09c && !(v & 0x8000) && (v & 0x20)) {  /* INTREQ clear VERTB */
         irq_pending = 0;
@@ -176,7 +178,7 @@ static unsigned int probes[16];
 static int nprobes, last_probe = -1;
 static unsigned long long probe_t, probe_sum[16], probe_n[16];
 
-static unsigned long long next_vbl = FRAME;
+static unsigned long long next_vbl = 283750;
 static int vbl_due;
 
 static unsigned int indisp_addr;          /* BT_INDISP: pv_indisp, the display context runs */
@@ -291,7 +293,7 @@ int main(int argc, char **argv)
     unsigned long long next = FRAME;
     int frame = 0, dumpi = 3;
     unsigned int last_e003 = 0, z80_frames = 0;
-    while (frame < seconds * 50) {
+    while (frame < seconds * FPS) {
         int c = m68k_execute(2000);
         now += c;
         if (!lev3_addr) lev3_addr = rd32(0x6c);
@@ -316,21 +318,21 @@ int main(int argc, char **argv)
                     if (*p == ',') p++;
                 }
             }
-            if (frame % 50 == 0) {
+            if (frame % FPS == 0) {
                 static unsigned int last_drawn;
                 unsigned int drawn = getenv("BT_DRAWN") ? rd16(BASE + (unsigned int)strtoul(getenv("BT_DRAWN"), NULL, 16)) : 0;
                 printf("second %d: vblank handler %.0f%%, display %.0f%% of the CPU, arcade frames %u, frames drawn %u, PC %06x\n",
-                       frame / 50, 100.0 * in_lev3 / (50.0 * FRAME), 100.0 * disp_cycles / (50.0 * FRAME), z80_frames,
+                       frame / FPS, 100.0 * in_lev3 / ((double)FPS * FRAME), 100.0 * disp_cycles / ((double)FPS * FRAME), z80_frames,
                        (drawn - last_drawn) & 0xffff, m68k_get_reg(NULL, M68K_REG_PC) - BASE);
                 disp_cycles = 0;
                 last_drawn = drawn;
                 in_lev3 = 0;
                 z80_frames = 0;
-                if (dumpi < argc && atoi(argv[dumpi]) == frame / 50) {
+                if (dumpi < argc && atoi(argv[dumpi]) == frame / FPS) {
                     dump_text();
                     check_text();
                     char dn[256];
-                    snprintf(dn, sizeof dn, "%s_%d.bin", getenv("BT_DUMP") ? getenv("BT_DUMP") : "build/amiga_mem", frame / 50);
+                    snprintf(dn, sizeof dn, "%s_%d.bin", getenv("BT_DUMP") ? getenv("BT_DUMP") : "build/amiga_mem", frame / FPS);
                     FILE *df = fopen(dn, "wb");   /* for tools/harness/render_frame.py */
                     fwrite(mem, 1, 0x400000, df);
                     fclose(df);

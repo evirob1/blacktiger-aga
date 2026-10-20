@@ -16,6 +16,7 @@
 ;                  both map layouts (64 x 128 and 128 x 64 tiles)
 ;      sprites     blitter objects drawn over the background (the background
 ;                  under them is saved first and put back two frames later)
+;    60 Hz (NTSC timing, as the arcade) unless built with -DPAL (50 Hz)
 ;      text layer  8 hardware sprites 64 pixels wide, 2 bitplanes like the
 ;                  arcade characters: per 64 pixels of a character row, two
 ;                  palettes (even sprite, odd sprite), set by the copper
@@ -71,6 +72,7 @@ BPLCON4		equ	$10c
 SPR0PTH		equ	$120
 COLOR00		equ	$180
 COLOR01		equ	$182
+BEAMCON0	equ	$1dc
 FMODE		equ	$1fc
 CIAA_PRA	equ	$bfe001
 CIAA_SDR	equ	$bfec01
@@ -95,7 +97,11 @@ MODULO		equ	LINEB-FETCHB
 WRAPMOD		equ	MODULO-PLANESZ
 NCOLSLOT	equ	24
 COLBIAS		equ	16			; memory column = map column + 16
-DISP_Y0		equ	$3c
+	ifd	PAL
+DISP_Y0		equ	$3c			; 50 Hz: 313 lines
+	else
+DISP_Y0		equ	$1c			; 60 Hz (NTSC timing, as the arcade): 262 lines
+	endif
 COPSIZE		equ	8192
 PALSECT		equ	8*(1+32)*4		; palette section at the start of each copper list
 TXROWS		equ	28			; arcade text rows 2-29 are visible
@@ -121,6 +127,7 @@ RECSIZE		equ	2*MAXBOB*REC_SIZE
 ; platform variables (a4 relative inside the display code)
 		rsreset
 pv_io		rs.b	16			; last value written to each I/O port
+pv_iod		rs.b	16			; the copy the display is drawing
 pv_slot_of	rs.b	24			; palette -> colour slot, -1: none
 pv_pal_of	rs.b	16			; colour slot -> palette, -1: none
 pv_nrec		rs.w	NBUF			; blitter objects drawn in each buffer
@@ -183,6 +190,9 @@ super:
 	move.b	#$88,CIAA_ICR
 	and.b	#$bf,CIAA_CRA
 	move.w	#$ff00,POTGO(a6)	; second fire button readable on POTINP
+	ifnd	PAL
+	clr.w	BEAMCON0(a6)		; NTSC timing: 60 frames a second, as the arcade
+	endif
 
 	bsr	unpack_data
 	bsr	init_display
@@ -750,11 +760,15 @@ draw_frame:
 	lea	CUSTOM,a6
 	move.w	#$2700,sr		; sprite RAM as buffered by the game
 	sf	pv_dwork(a4)
-	lea	pv_sprbuf(a4),a0
-	lea	pv_sprsnap(a4),a2
+	lea	pv_sprbuf(a4),a0	; with the I/O registers of the same moment
+	lea	pv_sprsnap(a4),a2	; (scroll, layout, video enables)
 	moveq	#NSPR-1,d0
 .sn	move.l	(a0)+,(a2)+
 	dbf	d0,.sn
+	move.l	pv_io(a4),pv_iod(a4)
+	move.l	pv_io+4(a4),pv_iod+4(a4)
+	move.l	pv_io+8(a4),pv_iod+8(a4)
+	move.l	pv_io+12(a4),pv_iod+12(a4)
 	moveq	#0,d0			; a free buffer
 .fb	cmp.w	pv_shown(a4),d0
 	beq.s	.nf
@@ -1036,7 +1050,7 @@ forget_all:
 ; covers scrolling in any direction, changed tiles and layout switches alike.
 update_background:
 	moveq	#1,d0
-	and.b	pv_io+$e(a4),d0		; layout
+	and.b	pv_iod+$e(a4),d0		; layout
 	cmp.w	pv_layout(a4),d0
 	beq.s	.same
 	move.w	d0,pv_layout(a4)
@@ -1051,9 +1065,9 @@ update_background:
 	moveq	#127,d1
 .l0	move.w	d1,pv_cmask(a4)
 	moveq	#0,d0
-	move.b	pv_io+9(a4),d0
+	move.b	pv_iod+9(a4),d0
 	lsl.w	#8,d0
-	move.b	pv_io+8(a4),d0
+	move.b	pv_iod+8(a4),d0
 	move.w	d2,d1
 	subq.w	#1,d1
 	and.w	d1,d0
@@ -1064,16 +1078,16 @@ update_background:
 	sub.w	d2,d0			; view across the left edge: negative
 .xok	move.w	d0,pv_vx(a4)
 	moveq	#0,d0
-	move.b	pv_io+$b(a4),d0
+	move.b	pv_iod+$b(a4),d0
 	lsl.w	#8,d0
-	move.b	pv_io+$a(a4),d0
+	move.b	pv_iod+$a(a4),d0
 	add.w	#16,d0			; arcade visible area starts at line 16
 	subq.w	#1,d3
 	and.w	d3,d0
 	move.w	d0,pv_vy(a4)
 
 	moveq	#2,d0
-	and.b	pv_io+$c(a4),d0
+	and.b	pv_iod+$c(a4),d0
 	sne	pv_bgoff(a4)		; background off: blank cells
 	bsr	scan_tiles
 	bsr	mark_sprites
@@ -1201,7 +1215,7 @@ scan_tiles:
 
 ; sprite palettes on screen -> d5, then pv_used (before any slot is given out)
 mark_sprites:
-	btst	#2,pv_io+$c(a4)		; sprites off?
+	btst	#2,pv_iod+$c(a4)		; sprites off?
 	bne.s	.x
 	lea	pv_sprsnap(a4),a0
 	moveq	#NSPR-1,d7
@@ -1503,7 +1517,7 @@ draw_bobs:
 	move.w	pv_back(a4),d0
 	lea	pv_nrec(a4),a0
 	clr.w	(a0,d0.w*2)
-	btst	#2,pv_io+$c(a4)		; sprites off?
+	btst	#2,pv_iod+$c(a4)		; sprites off?
 	bne	.x
 	bsr	blit_wait		; (flipbuf is free again)
 	move.l	pv_rec(a4),a2
@@ -1825,8 +1839,8 @@ build_copper:
 	move.w	d2,(a0)+
 	COPMOVE	BPLCON2,$0024		; sprites in front
 	COPMOVE	BPLCON4,$00fe		; sprite colours: even 240-255, odd 224-239
-	COPMOVE	DIWSTRT,$3ca1
-	COPMOVE	DIWSTOP,$1ca1
+	COPMOVE	DIWSTRT,(DISP_Y0<<8)|$a1
+	COPMOVE	DIWSTOP,(((DISP_Y0+VIEW_H)&255)<<8)|$a1
 	COPMOVE	DDFSTRT,$0038
 	COPMOVE	DDFSTOP,$00b8
 	COPMOVE	BPL1MOD,MODULO
@@ -1862,7 +1876,7 @@ build_copper:
 	moveq	#0,d7
 .spr	lea	nullspr(pc),a3
 	move.l	a3,d1
-	btst	#7,pv_io+4(a4)		; characters off?
+	btst	#7,pv_iod+4(a4)		; characters off?
 	bne.s	.sset
 	move.w	d7,d1
 	mulu.w	#TXSPR_SIZE,d1

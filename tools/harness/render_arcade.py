@@ -49,7 +49,7 @@ def main():
         lo, hi = zb(0xD800 + i), zb(0xDC00 + i)
         return ((lo >> 4) * 17, (lo & 15) * 17, (hi & 15) * 17)
 
-    io = lambda p: pvb("pv_io", p)
+    io = lambda p: pvb("pv_iod", p)
     layout = io(0x0E) & 1
     mw, mh = (2048, 1024) if layout else (1024, 2048)
     # the view position the display last drew with (the scroll registers may
