@@ -19,4 +19,6 @@ PK=$(awk '$1=="pv_keys"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst
 export BT_PVKEYS=$(printf "%x" $((0x$PV + 0x$PK)))
 PD=$(awk '$1=="pv_drawn"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst)
 export BT_DRAWN=$(printf "%x" $((0x$PV + 0x$PD)))
+PI=$(awk '$1=="pv_indisp"{sub("[AE]:","",$2); print $2; exit}' build/game/game.lst)
+export BT_INDISP=$(printf "%x" $((0x$PV + 0x$PI)))
 build/amiga_sim build/game/game.bin "$@"

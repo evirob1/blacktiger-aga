@@ -179,8 +179,16 @@ static unsigned long long probe_t, probe_sum[16], probe_n[16];
 static unsigned long long next_vbl = FRAME;
 static int vbl_due;
 
+static unsigned int indisp_addr;          /* BT_INDISP: pv_indisp, the display context runs */
+static unsigned long long disp_cycles, hook_last;
+
 void harness_hook(unsigned int pc)
 {
+    if (indisp_addr) {
+        unsigned long long t = now + m68k_cycles_run();
+        if (mem[indisp_addr]) disp_cycles += t - hook_last;
+        hook_last = t;
+    }
     /* the vertical blank arrives at its exact cycle, between any two instructions */
     if (!vbl_due && now + m68k_cycles_run() >= next_vbl) {
         vbl_due = 1;
@@ -273,6 +281,7 @@ int main(int argc, char **argv)
         }
     }
     if (getenv("BT_BLIT_CYC")) BLIT_CYC = atoi(getenv("BT_BLIT_CYC"));
+    if (getenv("BT_INDISP")) indisp_addr = BASE + (unsigned int)strtoul(getenv("BT_INDISP"), NULL, 16);
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68020);
     m68k_pulse_reset();
@@ -310,9 +319,10 @@ int main(int argc, char **argv)
             if (frame % 50 == 0) {
                 static unsigned int last_drawn;
                 unsigned int drawn = getenv("BT_DRAWN") ? rd16(BASE + (unsigned int)strtoul(getenv("BT_DRAWN"), NULL, 16)) : 0;
-                printf("second %d: vblank handler %.0f%% of the CPU, arcade frames %u, frames drawn %u, PC %06x\n",
-                       frame / 50, 100.0 * in_lev3 / (50.0 * FRAME), z80_frames,
+                printf("second %d: vblank handler %.0f%%, display %.0f%% of the CPU, arcade frames %u, frames drawn %u, PC %06x\n",
+                       frame / 50, 100.0 * in_lev3 / (50.0 * FRAME), 100.0 * disp_cycles / (50.0 * FRAME), z80_frames,
                        (drawn - last_drawn) & 0xffff, m68k_get_reg(NULL, M68K_REG_PC) - BASE);
+                disp_cycles = 0;
                 last_drawn = drawn;
                 in_lev3 = 0;
                 z80_frames = 0;
