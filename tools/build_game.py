@@ -70,8 +70,9 @@ def main():
     build.assemble(os.path.join(ROOT, "src", "amiga_main.s"), payload,
                    incdir=out, extra=["-I" + os.path.join(ROOT, "src"), "-L", lst] + (["-DPAL=1"] if a.pal else []))
     at = listing_symbol(lst, "bss_size")
-    bss = int.from_bytes(open(payload, "rb").read()[at:at + 4], "big")
-    mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"))
+    data = open(payload, "rb").read()
+    bss, chipa, chipb = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big") for i in range(3))
+    mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"), chipa, chipb)
 
 
 if __name__ == "__main__":

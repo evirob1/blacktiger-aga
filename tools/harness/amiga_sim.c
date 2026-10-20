@@ -16,7 +16,11 @@
 #include "m68k.h"
 
 #define MEMSIZE 0x01000000
-#define BASE    0x00010000
+/* where the program is loaded: BT_FASTMODE=1 puts it in "fast RAM" at
+   $800000 (no chip wait states) and passes a chip RAM block at $100000 in
+   A3, as the bootblock does with fast RAM */
+static unsigned int BASE = 0x00010000;
+#define CHIPBLOCK 0x00100000
 #define EXEC    0x00008000
 static unsigned long long FRAME = 283750;  /* PAL; NTSC timing (BEAMCON0 = 0): 262 lines */
 #define FPS (FRAME == 283750 ? 50 : 60)
@@ -187,7 +191,7 @@ static void custom_write(unsigned int reg, unsigned int v)
         char dn[256];
         snprintf(dn, sizeof dn, "%s_red.bin", getenv("BT_DUMP") ? getenv("BT_DUMP") : "build/amiga_mem");
         FILE *df = fopen(dn, "wb");
-        fwrite(mem, 1, 0x400000, df);
+        fwrite(mem, 1, BASE > 0x10000 ? MEMSIZE : 0x400000, df);
         fclose(df);
         exit(1);
     }
@@ -276,7 +280,8 @@ static int z80(unsigned int addr) { return BASE + z80mem_off + 0x8000 + (short)(
 /* every visible text cell: does the sprite data show what text RAM holds? */
 static void check_text(void)
 {
-    unsigned int txspr = BASE + (unsigned int)strtoul(getenv("BT_TXSPR"), NULL, 16);
+    unsigned int txspr = rd32(BASE + (unsigned int)strtoul(getenv("BT_CHIPA"), NULL, 16)) +
+                         (unsigned int)strtoul(getenv("BT_CATXSPR"), NULL, 16);
     unsigned int chars = BASE + (unsigned int)strtoul(getenv("BT_CHARS"), NULL, 16);
     int bad = 0;
     for (int row = 2; row < 30; row++)
@@ -320,7 +325,8 @@ int main(int argc, char **argv)
     if (argc < 3) { fprintf(stderr, "usage: amiga_sim game.bin seconds [dump_at...]\n"); return 1; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 1; }
-    size_t len = fread(mem + BASE, 1, MEMSIZE - BASE - 0x400000, f);
+    if (getenv("BT_FASTMODE")) { BASE = 0x800000; fast_from = 0x800000; }
+    size_t len = fread(mem + BASE, 1, 0x400000, f);
     fclose(f);
     int seconds = atoi(argv[2]);
     /* the platform code starts with lea super(pc),a5 / jsr -30(a6): fake Supervisor */
@@ -354,6 +360,7 @@ int main(int argc, char **argv)
     m68k_set_cpu_type(M68K_CPU_TYPE_68020);
     m68k_pulse_reset();
     m68k_set_reg(M68K_REG_A6, EXEC);
+    m68k_set_reg(M68K_REG_A3, BASE > 0x10000 ? CHIPBLOCK : 0);
     m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
 
     unsigned long long next = FRAME;
@@ -410,7 +417,7 @@ int main(int argc, char **argv)
                     char dn[256];
                     snprintf(dn, sizeof dn, "%s_%d.bin", getenv("BT_DUMP") ? getenv("BT_DUMP") : "build/amiga_mem", frame / FPS);
                     FILE *df = fopen(dn, "wb");   /* for tools/harness/render_frame.py */
-                    fwrite(mem, 1, 0x400000, df);
+                    fwrite(mem, 1, BASE > 0x10000 ? MEMSIZE : 0x400000, df);
                     fclose(df);
                     dumpi++;
                 }

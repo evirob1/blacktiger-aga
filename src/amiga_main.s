@@ -196,7 +196,18 @@ start:
 	jsr	-30(a6)			; Exec Supervisor(): continue in supervisor mode
 super:
 	move.w	#$2700,sr
-	lea	plat_stack_top(pc),sp
+	lea	chipa(pc),a0		; a3 (bootblock): separate chip RAM block, or 0
+	move.l	a3,d0
+	bne.s	.fast
+	lea	packed(pc),a1
+	move.l	a1,(a0)
+	lea	bss_end(pc),a1
+	move.l	a1,4(a0)
+	bra.s	.mem
+.fast	move.l	d0,(a0)
+	add.l	#(CHIPA_SIZE+7)&-8,d0
+	move.l	d0,4(a0)
+.mem	lea	plat_stack_top(pc),sp
 	lea	CUSTOM,a6
 	move.w	#$7fff,INTENA(a6)
 	move.w	#$7fff,INTREQ(a6)
@@ -239,6 +250,16 @@ PLAT_OUT macro
 	endm
 
 CYC	macro
+	endm
+
+CHIPA	macro				; \2 = chip area A + \1
+	move.l	chipa(pc),\2
+	add.l	#\1,\2
+	endm
+
+CHIPB	macro				; \2 = chip area B + \1
+	move.l	chipb(pc),\2
+	add.l	#\1,\2
 	endm
 
 BOUNDARY macro
@@ -331,7 +352,7 @@ z80_bad_jump:
 	lea	CUSTOM,a6
 	move.w	#$7fff,DMACON(a6)
 	move.l	d7,d6
-	lea	save0(pc),a0		; one bitplane, 320 x 256
+	CHIPB	CB_SAVE0,a0		; one bitplane, 320 x 256
 	move.w	#40*256/4-1,d0
 .cl	clr.l	(a0)+
 	dbf	d0,.cl
@@ -346,10 +367,10 @@ z80_bad_jump:
 	moveq	#4-1,d1
 	bsr	.hex
 	lea	bad_title(pc),a2
-	lea	save0+40*96+4(pc),a3
+	CHIPB	CB_SAVE0+40*96+4,a3
 	bsr	bad_text
 	lea	bad_where(pc),a2
-	lea	save0+40*128+6(pc),a3
+	CHIPB	CB_SAVE0+40*128+6,a3
 	bsr	bad_text
 	move.w	#$1200,BPLCON0(a6)	; plain lowres, 1 plane
 	clr.w	BPLCON1(a6)
@@ -364,7 +385,7 @@ z80_bad_jump:
 	move.w	#$0b00,COLOR00(a6)
 	move.w	#$0fff,COLOR01(a6)
 	move.w	#$8300,DMACON(a6)	; bitplanes only; the CPU sets the pointer
-	lea	save0(pc),a0
+	CHIPB	CB_SAVE0,a0
 .fr	move.l	VPOSR(a6),d0
 	and.l	#$1ff00,d0
 	cmp.l	#$00200,d0
@@ -542,16 +563,16 @@ unpack_data:
 	lea	z80banks(pc),a1
 	bsr	lz_unpack
 	lea	lz_tiles(pc),a0
-	lea	bgtiles(pc),a1
+	CHIPB	CB_BGTILES,a1
 	bsr	lz_unpack
 	lea	lz_chars(pc),a0
 	lea	chars(pc),a1
 	bsr	lz_unpack
 	lea	lz_sprites(pc),a0
-	lea	sprites(pc),a1
+	CHIPB	CB_SPRITES,a1
 	bsr	lz_unpack
-	lea	sprites(pc),a0		; mask: 1 where any pen but 15 (transparent)
-	lea	sprmask(pc),a1
+	CHIPB	CB_SPRITES,a0		; mask: 1 where any pen but 15 (transparent)
+	CHIPB	CB_SPRMASK,a1
 	move.w	#2048-1,d7
 .sm	moveq	#15,d6
 .sl	move.w	(a0),d0
@@ -564,7 +585,7 @@ unpack_data:
 	dbf	d6,.sl
 	lea	128-32(a0),a0
 	dbf	d7,.sm
-	lea	sprmask(pc),a0		; rows with pixels: first << 8 | count
+	CHIPB	CB_SPRMASK,a0		; rows with pixels: first << 8 | count
 	lea	sprrows(pc),a1
 	move.w	#2048-1,d7
 .sr	moveq	#-1,d0			; first
@@ -589,8 +610,8 @@ unpack_data:
 	move.b	d1,d2
 .st	move.w	d2,(a1)+
 	dbf	d7,.sr
-	lea	packed(pc),a0
-	move.l	#(reuse_end-packed)/4,d0
+	CHIPA	0,a0			; display buffers: cleared
+	move.l	#CHIPA_SIZE/4,d0
 .cl	clr.l	(a0)+
 	subq.l	#1,d0
 	bne.s	.cl
@@ -635,7 +656,7 @@ init_display:
 	bne.s	.rv
 	; text sprites: control words, 64 pixels wide, VIEW_H lines from DISP_Y0;
 	; sprites 2n and 2n+1 cover the same 64 pixels
-	lea	txspr(pc),a0
+	CHIPA	CA_TXSPR,a0
 	moveq	#0,d7
 .sp	move.w	#DISP_Y0,d0
 	move.w	#DISP_Y0+VIEW_H,d1
@@ -755,7 +776,7 @@ set_buffer:
 	moveq	#0,d0
 	move.w	pv_back(a4),d0
 	mulu.l	#BMSIZE,d0
-	lea	bitmap0(pc),a0
+	CHIPA	CA_BITMAP0,a0
 	add.l	d0,a0
 	move.l	a0,pv_bm(a4)
 	move.w	pv_back(a4),d0
@@ -771,7 +792,7 @@ set_buffer:
 	move.w	pv_back(a4),d0
 	mulu.w	#MAXBOB*SAVE_PER/4,d0
 	lsl.l	#2,d0
-	lea	save0(pc),a0
+	CHIPB	CB_SAVE0,a0
 	add.l	d0,a0
 	move.l	a0,pv_save(a4)
 	move.l	(sp)+,d0
@@ -965,7 +986,7 @@ draw_row:
 	move.w	d5,d0
 	lsl.w	#3,d0
 	add.w	d0,a1
-	lea	txspr+16(pc),a2		; block 0, even sprite, this row
+	CHIPA	CA_TXSPR+16,a2		; block 0, even sprite, this row
 	move.w	d5,d0
 	lsl.w	#7,d0			; 8 lines x 16 bytes
 	add.w	d0,a2
@@ -1565,12 +1586,12 @@ draw_tile:
 	or.w	d2,d0			; tile number
 	and.l	#$7ff,d0
 	lsl.l	#7,d0
-	lea	bgtiles(pc),a2
+	CHIPB	CB_BGTILES,a2
 	add.l	d0,a2
 	tst.b	d1
 	bpl.s	.noflip
 	bsr	blit_wait		; the blitter may still read the last flipped tile
-	lea	fliptile(pc),a3
+	CHIPA	CA_FLIPTILE,a3
 	lea	rev_table(pc),a0
 	moveq	#63,d2
 .fl	moveq	#0,d0
@@ -1580,7 +1601,7 @@ draw_tile:
 	move.b	(a0,d0.w),(a3)+
 	move.b	d3,(a3)+
 	dbf	d2,.fl
-	lea	fliptile(pc),a2
+	CHIPA	CA_FLIPTILE,a2
 	move.l	d4,a0
 .noflip	moveq	#3,d2			; pen planes 0-3 from the tile
 .p	bsr	blit_wait
@@ -1751,7 +1772,7 @@ draw_bobs:
 	bne	.x
 	bsr	blit_wait		; (flipbuf is free again)
 	move.l	pv_rec(a4),a2
-	lea	flipbuf(pc),a3
+	CHIPA	CA_FLIPBUF,a3
 	moveq	#0,d7			; objects
 	moveq	#NSPR-1,d6
 .spr	lea	pv_sprsnap(a4),a0
@@ -1786,11 +1807,11 @@ draw_bobs:
 	bsr	get_slot
 	move.w	d0,d3			; slot; the rows in the upper word
 	move.l	d4,d0
-	lea	sprmask(pc),a0
+	CHIPB	CB_SPRMASK,a0
 	move.l	d0,d4
 	lsl.l	#5,d4
 	add.l	d4,a0
-	lea	sprites(pc),a1
+	CHIPB	CB_SPRITES,a1
 	lsl.l	#7,d0
 	add.l	d0,a1
 	btst	#3,d1
@@ -1889,14 +1910,14 @@ get_flipped:
 	move.w	pv_drawn(a4),2(a2)
 	move.l	a3,-(sp)
 	mulu.w	#160,d1
-	lea	flipcache(pc),a3
+	CHIPA	CA_FLIPCACHE,a3
 	add.l	d1,a3
 	bsr	flip_sprite
 	move.l	(sp)+,a3
 	bra.s	.x
 .hit	move.w	pv_drawn(a4),2(a2)
 	mulu.w	#160,d1
-	lea	flipcache(pc),a1
+	CHIPA	CA_FLIPCACHE,a1
 	add.l	d1,a1
 	lea	128(a1),a0
 	bra.s	.x
@@ -2056,7 +2077,7 @@ slot_colours:
 build_copper:
 	lea	pvars(pc),a4
 	lea	z80mem+$8000(pc),a5
-	lea	coplist0(pc),a0
+	CHIPA	CA_COPLIST0,a0
 	move.w	pv_back(a4),d0
 	mulu.w	#COPSIZE,d0
 	add.l	d0,a0
@@ -2148,13 +2169,13 @@ build_copper:
 	; sprite pointers: text (if enabled)
 	move.w	#SPR0PTH,d3
 	moveq	#0,d7
-.spr	lea	nullspr(pc),a3
+.spr	CHIPA	CA_NULLSPR,a3
 	move.l	a3,d1
 	btst	#7,pv_iod+4(a4)		; characters off?
 	bne.s	.sset
 	move.w	d7,d1
 	mulu.w	#TXSPR_SIZE,d1
-	lea	txspr(pc),a3
+	CHIPA	CA_TXSPR,a3
 	add.l	a3,d1
 .sset	move.w	d3,(a0)+
 	swap	d1
@@ -2298,7 +2319,11 @@ cop_wait:
 cop_wset:	dc.w	0
 cop_wrest:	dc.w	0
 coplist_ptr:		dc.l	0
-bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py)
+bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py: BSS,
+			dc.l	CHIPA_SIZE		; chip area A in fast RAM mode,
+			dc.l	CHIPB_SIZE		; chip area B)
+chipa:			dc.l	0		; chip RAM areas (see the end of the file)
+chipb:			dc.l	0
 
 ;------------------------------------------------------------------------------
 	cnop	0,4
@@ -2324,34 +2349,39 @@ lz_chars:	incbin	"chars.lz"
 lz_sprites:	incbin	"sprites.lz"
 packed_end:
 
-; ... after which its space holds the display buffers
-bitmap0		equ	packed+16		; NBUF bitmaps
-coplist0	equ	bitmap0+NBUF*BMSIZE	; NBUF copper lists
-txspr		equ	coplist0+NBUF*COPSIZE
-nullspr		equ	txspr+8*TXSPR_SIZE
-rec0		equ	nullspr+32		; NBUF object lists
-flipbuf		equ	rec0+NBUF*RECSIZE
-flipcache	equ	flipbuf+MAXBOB*160	; 64 x 160
-fliptile	equ	flipcache+64*160
-reuse_end	equ	fliptile+128
-	ifgt	reuse_end-packed_end
+; Chip RAM, in two areas (chipa, chipb). Without fast RAM everything is in
+; the one chip RAM block the bootblock loads into: area A (display buffers)
+; reuses the packed data's space once it is unpacked, area B follows the BSS.
+; With fast RAM the program and its data are there, and both areas are a
+; separate chip RAM block.
+CA_BITMAP0	equ	16			; NBUF bitmaps
+CA_COPLIST0	equ	CA_BITMAP0+NBUF*BMSIZE	; NBUF copper lists
+CA_TXSPR	equ	CA_COPLIST0+NBUF*COPSIZE
+CA_NULLSPR	equ	CA_TXSPR+8*TXSPR_SIZE
+CA_FLIPBUF	equ	CA_NULLSPR+32
+CA_FLIPCACHE	equ	CA_FLIPBUF+MAXBOB*160	; 64 x 160
+CA_FLIPTILE	equ	CA_FLIPCACHE+64*160
+CHIPA_SIZE	equ	CA_FLIPTILE+128
+	ifgt	CHIPA_SIZE-(packed_end-packed)
 	fail	"display buffers don't fit in the packed data's space"
 	endif
+CB_BGTILES	equ	0			; blitter sources and the save areas
+CB_SPRITES	equ	CB_BGTILES+2048*128
+CB_SPRMASK	equ	CB_SPRITES+2048*128
+CB_SAVE0	equ	CB_SPRMASK+2048*32	; NBUF save areas
+CHIPB_SIZE	equ	CB_SAVE0+NBUF*MAXBOB*SAVE_PER
 
 ; BSS: allocated (cleared) by the bootblock right after the loaded file
 	cnop	0,8
 bss_start:
 z80banks	equ	bss_start
-bgtiles		equ	z80banks+16*16384
-sprites		equ	bgtiles+2048*128
-chars		equ	sprites+2048*128
-sprmask		equ	chars+2048*16
-sprrows		equ	sprmask+2048*32		; per sprite: first row << 8 | rows
+chars		equ	z80banks+16*16384
+sprrows		equ	chars+2048*16		; per sprite: first row << 8 | rows
 z80mem		equ	sprrows+2048*2
 bgram		equ	z80mem+65536
 task_stacks	equ	bgram+16384
 bgshadow0	equ	task_stacks+16*1024	; NBUF background shadows
-save0		equ	bgshadow0+NBUF*SHSIZE	; NBUF save areas
-txshadow	equ	save0+NBUF*MAXBOB*SAVE_PER
+rec0		equ	bgshadow0+NBUF*SHSIZE	; NBUF object lists
+txshadow	equ	rec0+NBUF*RECSIZE
 palshadow	equ	txshadow+2048		; 1032 bytes
 bss_end		equ	palshadow+1032

@@ -17,7 +17,7 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import bt_rom  # noqa: E402
 
-BASE = 0x10000
+BASE = int(os.environ.get("BT_BASE", "10000"), 16)   # amiga_sim BT_FASTMODE: 800000
 W, H = 256, 224
 
 

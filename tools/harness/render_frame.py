@@ -6,11 +6,12 @@ for the 256 x 224 display window.
 
 usage: python3 tools/harness/render_frame.py build/amiga_mem.bin out.png
 """
+import os
 import re
 import sys
 from PIL import Image
 
-BASE = 0x10000
+BASE = int(os.environ.get("BT_BASE", "10000"), 16)   # amiga_sim BT_FASTMODE: 800000
 H, W = 224, 256
 
 

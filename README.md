@@ -51,6 +51,11 @@ python tools/build_game.py       -> build/blacktiger.adf (60 Hz, like the arcade
 python tools/build_game.py --pal -> 50 Hz version
 ```
 
+Memory: a stock A1200 (2 MB chip RAM) is enough: the game takes about 1.85 MB.
+With fast RAM (about 1.2 MB free, e.g. any 4 MB expansion) the program and the
+arcade's memory go there and only the graphics stay in chip RAM, which makes
+the busy scenes noticeably smoother. The same disk does both, automatically.
+
 The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
 arcade's own frame rate: the game runs at the original speed. That needs a
 display that accepts 60 Hz (any 15 kHz arcade monitor or most TVs; WinUAE
