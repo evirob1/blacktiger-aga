@@ -160,6 +160,7 @@ def build(rom, dynamic_path=None):
         static_tables(cm)
         data_pointers(cm)
         gap_routines(cm)
+        bank_entry_tables(cm)
         multiway_returns(cm)
         if len(cm.insns) == n:
             break
@@ -414,6 +415,35 @@ def data_pointers(cm):
             cm.add(*k)
 
 
+def bank_entry_tables(cm):
+    """Tables of entry points in other banks, in the fixed ROM: runs of at
+    least two 4-byte records (bank, 0, address in $8000-$BFFF) outside the
+    known code whose targets read as code in that bank (e.g. $72EB, item
+    handlers reached through a bank-switching dispatcher)."""
+    code = cm.code_bytes()
+    rom = cm.rom
+
+    def rec(a):
+        b, z, w = rom[a], rom[a + 1], rom[a + 2] | rom[a + 3] << 8
+        if b < 16 and z == 0 and 0x8000 <= w < 0xC000 and not any((None, a + i) in code for i in range(4)):
+            if (b, w) in cm.insns or (_looks_like_code(cm, b, w) and _closure_ok(cm, b, w)):
+                return (b, w)
+        return None
+
+    found, a = [], 0
+    while a < 0x8000 - 4:
+        if rec(a) and rec(a + 4):
+            while rec(a):
+                found.append(rec(a))
+                a += 4
+        else:
+            a += 1
+    for k in found:
+        if k not in cm.insns:
+            cm.entries.add(k)
+            cm.add(*k)
+
+
 def gap_routines(cm):
     """Routines laid out one after another but only reached through computed
     addresses (e.g. object behaviours in a bank): right after a known
@@ -424,11 +454,17 @@ def gap_routines(cm):
     Repeats while new code turns up."""
     while True:
         found = []
+        loaded = set()          # addresses some code loads into HL: tables, not code
+        for (b, a), ins in cm.insns.items():
+            if ins.text.startswith("ld hl,$") and len(ins.text) == 11:
+                loaded.add(int(ins.text[-4:], 16))
         for (b, a), ins in list(cm.insns.items()):
             if ins.cond is not None or ins.kind not in ("jp", "jr", "ret", "reti"):
                 continue
             k = loc(b, a + ins.length)
             if k in cm.insns or (k[0] is None and k[1] >= 0x8000) or k[1] >= 0xC000:
+                continue
+            if k[1] in loaded or k in cm.tables:
                 continue
             if _small_routine(cm, k[0], k[1]) and _closure_ok(cm, k[0], k[1]):
                 found.append(k)
@@ -481,6 +517,8 @@ def _closure_ok(cm, bank, addr, limit=400):
                 return False
             ins = decode(sp, pc)
             if "undefined" in ins.text or "prefix" in ins.text or ins.kind == "halt":
+                return False
+            if ins.text in ("inc sp", "dec sp") or ins.text.startswith(("add hl,sp", "ld sp,(")):
                 return False
             if ins.kind in ("jp", "jr", "call", "rst") and ins.target is not None:
                 if ins.target >= 0xC000 or (bank is None and ins.target >= 0x8000):

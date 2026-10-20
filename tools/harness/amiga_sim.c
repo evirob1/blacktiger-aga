@@ -34,7 +34,7 @@ static unsigned int rd32(unsigned int a) { return rd16(a) << 16 | rd16(a + 2); }
 
 /* the blitter takes 1 memory cycle per word per channel used (at least 2),
    BLIT_CYC 68k cycles each (a colour clock is 4; the rest for display DMA) */
-#define BLIT_CYC 6
+static int BLIT_CYC = 6;                /* BT_BLIT_CYC overrides */
 static unsigned long long blit_busy;
 
 static unsigned int custom_read(unsigned int reg)
@@ -139,9 +139,14 @@ static void custom_write(unsigned int reg, unsigned int v)
         irq_pending = 0;
         m68k_set_irq(0);
     }
-    if ((reg & 0x1fe) == 0x180 && v == 0x0f00) {
+    if ((reg & 0x1fe) == 0x180 && v == 0x0b00) {      /* z80_bad_jump's red screen */
         unsigned int d7 = m68k_get_reg(NULL, M68K_REG_D7);
         printf("red screen: computed jump to untranslated Z80 code: bank %02x address $%04x\n", (d7 >> 16) & 0xff, d7 & 0xffff);
+        char dn[256];
+        snprintf(dn, sizeof dn, "%s_red.bin", getenv("BT_DUMP") ? getenv("BT_DUMP") : "build/amiga_mem");
+        FILE *df = fopen(dn, "wb");
+        fwrite(mem, 1, 0x400000, df);
+        fclose(df);
         exit(1);
     }
 }
@@ -267,6 +272,7 @@ int main(int argc, char **argv)
             if (*p == ',') p++;
         }
     }
+    if (getenv("BT_BLIT_CYC")) BLIT_CYC = atoi(getenv("BT_BLIT_CYC"));
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68020);
     m68k_pulse_reset();
@@ -313,8 +319,8 @@ int main(int argc, char **argv)
                 if (dumpi < argc && atoi(argv[dumpi]) == frame / 50) {
                     dump_text();
                     check_text();
-                    char dn[64];
-                    snprintf(dn, sizeof dn, "build/amiga_mem_%d.bin", frame / 50);
+                    char dn[256];
+                    snprintf(dn, sizeof dn, "%s_%d.bin", getenv("BT_DUMP") ? getenv("BT_DUMP") : "build/amiga_mem", frame / 50);
                     FILE *df = fopen(dn, "wb");   /* for tools/harness/render_frame.py */
                     fwrite(mem, 1, 0x400000, df);
                     fclose(df);

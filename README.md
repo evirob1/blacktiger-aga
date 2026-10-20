@@ -55,8 +55,9 @@ or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
 **2** = 2 players. Not there yet: sound, and scenery drawn in front of sprites
 (sprites currently always appear on top).
 
-If the screen turns plain red, the game reached Z80 code the translator
-hasn't seen yet (please report where it happened).
+If the screen turns red with "UNKNOWN Z80 CODE / BANK xx AT xxxx", the game
+reached Z80 code the translator hasn't seen yet: please report those numbers
+and where it happened.
 
 ## Running in WinUAE
 

@@ -70,6 +70,7 @@ BPL2MOD		equ	$10a
 BPLCON4		equ	$10c
 SPR0PTH		equ	$120
 COLOR00		equ	$180
+COLOR01		equ	$182
 FMODE		equ	$1fc
 CIAA_PRA	equ	$bfe001
 CIAA_SDR	equ	$bfec01
@@ -125,6 +126,9 @@ pv_dwork	rs.b	1			; display: a frame to draw
 pv_ddone	rs.b	1			; display: frame drawn, copper list set
 pv_bgoff	rs.b	1			; background disabled (port $0C)
 pv_drawn	rs.w	1			; frames drawn (for tools/harness/amiga_sim)
+pv_textver	rs.w	1			; text colours version (rows / palette)
+pv_csig		rs.l	2			; per copper list: wrap line << 16 | pv_textver
+pv_txhalf	rs.w	1			; text rows checked this frame: 0 / 14
 pv_layout	rs.w	1			; 0: 64 x 128 tiles, 1: 128 x 64 (port $0E)
 pv_cmask	rs.w	1			; map width in tiles - 1
 pv_vx		rs.w	1			; view position in the map (pixels, signed)
@@ -271,14 +275,98 @@ z80_ei:
 .x	move.w	(sp)+,sr
 	rts
 
-; something jumped to Z80 code that was never translated: stop with a red screen
+; something jumped to Z80 code that was never translated: stop with a red
+; screen that says where (d7 = bank << 16 | address), in the arcade's font
 z80_bad_jump:
 	move.w	#$2700,sr
 	lea	CUSTOM,a6
-	move.w	#$01ff,DMACON(a6)	; all DMA off: just the background colour
-	move.w	#$0000,BPLCON3(a6)
-.red	move.w	#$0f00,COLOR00(a6)
-	bra.s	.red
+	move.w	#$7fff,DMACON(a6)
+	move.l	d7,d6
+	lea	save0(pc),a0		; one bitplane, 320 x 256
+	move.w	#40*256/4-1,d0
+.cl	clr.l	(a0)+
+	dbf	d0,.cl
+	lea	bad_where+5(pc),a0	; "BANK xx AT xxxx"
+	move.l	d6,d0
+	swap	d0
+	moveq	#2-1,d1
+	ror.w	#8,d0
+	bsr	.hex
+	lea	bad_where+11(pc),a0
+	move.w	d6,d0
+	moveq	#4-1,d1
+	bsr	.hex
+	lea	bad_title(pc),a2
+	lea	save0+40*96+4(pc),a3
+	bsr	bad_text
+	lea	bad_where(pc),a2
+	lea	save0+40*128+6(pc),a3
+	bsr	bad_text
+	move.w	#$1200,BPLCON0(a6)	; plain lowres, 1 plane
+	clr.w	BPLCON1(a6)
+	clr.w	BPLCON2(a6)
+	clr.w	BPLCON3(a6)
+	clr.w	FMODE(a6)
+	move.w	#$2c81,DIWSTRT(a6)
+	move.w	#$2cc1,DIWSTOP(a6)
+	move.w	#$0038,DDFSTRT(a6)
+	move.w	#$00d0,DDFSTOP(a6)
+	clr.w	BPL1MOD(a6)
+	move.w	#$0b00,COLOR00(a6)
+	move.w	#$0fff,COLOR01(a6)
+	move.w	#$8300,DMACON(a6)	; bitplanes only; the CPU sets the pointer
+	lea	save0(pc),a0
+.fr	move.l	VPOSR(a6),d0
+	and.l	#$1ff00,d0
+	cmp.l	#$00200,d0
+	bne.s	.fr
+	move.l	a0,BPL1PTH(a6)
+.fr2	move.l	VPOSR(a6),d0
+	and.l	#$1ff00,d0
+	cmp.l	#$00200,d0
+	beq.s	.fr2
+	bra.s	.fr
+; d0 = value (top digit in bits 15-12), d1 = digits - 1 -> ASCII at (a0)
+.hex	rol.w	#4,d0
+	moveq	#15,d2
+	and.w	d0,d2
+	move.b	.dig(pc,d2.w),(a0)+
+	dbf	d1,.hex
+	rts
+.dig	dc.b	"0123456789ABCDEF"
+
+; text a2 (0-terminated) at a3, characters doubled to 16 x 16
+bad_text:
+.c	moveq	#0,d0
+	move.b	(a2)+,d0
+	beq.s	.x
+	lsl.w	#4,d0
+	lea	chars(pc),a0
+	add.w	d0,a0			; 8 x (plane A, plane B)
+	move.l	a3,a1
+	moveq	#7,d3
+.l	move.b	(a0)+,d0
+	or.b	(a0)+,d0		; any pen but the transparent one
+	moveq	#0,d1
+	moveq	#7,d2
+.b	add.b	d0,d0			; each pixel twice
+	scs	d4
+	add.w	d1,d1
+	add.w	d1,d1
+	and.w	#3,d4
+	or.w	d4,d1
+	dbf	d2,.b
+	move.w	d1,(a1)
+	move.w	d1,40(a1)
+	lea	80(a1),a1
+	dbf	d3,.l
+	addq.l	#2,a3
+	bra.s	.c
+.x	rts
+
+bad_title:	dc.b	"UNKNOWN Z80 CODE",0
+bad_where:	dc.b	"BANK xx AT xxxx",0
+	even
 
 plat_irq:				; (rt_core header; the Amiga uses lev3)
 	rte
@@ -418,6 +506,31 @@ unpack_data:
 	dbf	d6,.sl
 	lea	128-32(a0),a0
 	dbf	d7,.sm
+	lea	sprmask(pc),a0		; rows with pixels: first << 8 | count
+	lea	sprrows(pc),a1
+	move.w	#2048-1,d7
+.sr	moveq	#-1,d0			; first
+	moveq	#0,d1			; last + 1
+	moveq	#0,d2
+.r	tst.w	(a0)+
+	beq.s	.e
+	tst.w	d0
+	bpl.s	.f
+	move.w	d2,d0
+.f	move.w	d2,d1
+	addq.w	#1,d1
+.e	addq.w	#1,d2
+	cmp.w	#16,d2
+	bne.s	.r
+	moveq	#0,d2
+	tst.w	d0
+	bmi.s	.st			; empty
+	sub.w	d0,d1
+	move.b	d0,d2
+	lsl.w	#8,d2
+	move.b	d1,d2
+.st	move.w	d2,(a1)+
+	dbf	d7,.sr
 	lea	packed(pc),a0
 	move.l	#(reuse_end-packed)/4,d0
 .cl	clr.l	(a0)+
@@ -529,6 +642,9 @@ init_display:
 	lea	ctx_d(pc),a1
 	move.l	a0,(a1)
 	st	pv_ddone(a4)		; first frame at the first vblank
+	moveq	#-1,d0
+	move.l	d0,pv_csig(a4)		; copper lists not built yet
+	move.l	d0,pv_csig+4(a4)
 	clr.w	pv_back(a4)
 	bsr	set_buffer
 	move.w	#2,pv_paldirty(a4)
@@ -690,10 +806,19 @@ read_inputs:
 
 ;------------------------------------------------------------------------------
 ; text layer: arcade rows 2-29 into the sprites. Rows are compared with the
-; shadow copy 4 bytes at a time; a changed row is drawn again in full.
+; shadow copy 4 bytes at a time (half of them each frame); a changed row is
+; drawn again in full.
 update_text:
 	lea	txshadow(pc),a3
-	moveq	#0,d5			; row 0-27
+	move.w	pv_txhalf(a4),d5	; half the rows per frame: 0-13, 14-27
+	move.w	d5,d4
+	add.w	#TXROWS/2,d4
+	cmp.w	#TXROWS,d4
+	blo.s	.h
+	moveq	#0,d4
+.h	move.w	d4,pv_txhalf(a4)
+	move.w	d5,d4
+	add.w	#TXROWS/2,d4		; end
 .row	move.w	d5,d0
 	addq.w	#2,d0
 	lsl.w	#5,d0			; first cell of the row
@@ -718,7 +843,7 @@ update_text:
 	dbf	d1,.cp
 	bsr	draw_row
 .same	addq.w	#1,d5
-	cmp.w	#TXROWS,d5
+	cmp.w	d4,d5
 	bne.s	.row
 	rts
 
@@ -727,6 +852,7 @@ update_text:
 ; further palette is shown with the first)
 draw_row:
 	movem.l	d0-d7/a0-a3,-(sp)
+	addq.w	#1,pv_textver(a4)
 	move.w	d5,d0
 	addq.w	#2,d0
 	lsl.w	#5,d0
@@ -914,8 +1040,10 @@ update_background:
 	moveq	#2,d0
 	and.b	pv_io+$c(a4),d0
 	sne	pv_bgoff(a4)		; background off: blank cells
-	bsr	mark_used
+	bsr	read_tiles
+	bsr	mark_sprites
 	bsr	blit_setup
+	lea	tilebuf(pc),a2
 	bsr	view_rows
 .row	movem.w	d6-d7,-(sp)
 	bsr	bg_row
@@ -944,32 +1072,53 @@ view_cols:
 	sub.w	d4,d7
 	rts
 
-; palettes on screen this frame -> pv_used (before any slot is given out)
-mark_used:
+; the visible tile words, row by row, into tilebuf; their palettes -> d5.
+; A row lies in one 4K bank of background RAM; it is read with interrupts
+; off, so the game can't switch that bank in between.
+read_tiles:
 	moveq	#0,d5
-	btst	#1,pv_io+$c(a4)		; background off?
-	bne.s	.spr
+	tst.b	pv_bgoff(a4)
+	bne.s	.x
 	lea	colpart(pc),a0
 	tst.w	pv_layout(a4)
 	beq.s	.c0
 	lea	256(a0),a0
-.c0	bsr	view_rows
+.c0	lea	tilebuf(pc),a3
+	bsr	view_rows
 .row	movem.w	d6-d7,-(sp)
-	bsr	row_ptr
-	bsr	view_cols
+	bsr	row_off
+	move.w	#$2700,sr
+	move.w	d0,d1
+	lsr.w	#8,d1
+	lsr.w	#4,d1			; 4K bank
+	cmp.b	rt_vars+RT_BGBANK(pc),d1
+	beq.s	.live
+	lea	bgram(pc),a2
+	add.w	d0,a2
+	bra.s	.got
+.live	and.w	#$0fff,d0
+	lea	(ZC000,a5),a2		; the bank the Z80 sees at $C000
+	add.w	d0,a2
+.got	bsr	view_cols
 .col	move.w	d4,d1
 	and.w	pv_cmask(a4),d1
 	move.w	(a0,d1.w*2),d1
-	move.b	1(a2,d1.w),d0		; attribute
-	lsr.b	#3,d0
-	and.w	#15,d0
-	bset	d0,d5
+	move.w	(a2,d1.w),d1		; tile word: code << 8 | attribute
+	move.w	d1,(a3)+
+	lsr.b	#3,d1
+	and.w	#15,d1
+	bset	d1,d5
 	addq.w	#1,d4
 	dbf	d7,.col
+	move.w	#$2000,sr
 	movem.w	(sp)+,d6-d7
 	addq.w	#1,d6
 	dbf	d7,.row
-.spr	btst	#2,pv_io+$c(a4)		; sprites off?
+.x	rts
+
+; sprite palettes on screen -> d5, then pv_used (before any slot is given out)
+mark_sprites:
+	btst	#2,pv_io+$c(a4)		; sprites off?
 	bne.s	.x
 	lea	pv_sprsnap(a4),a0
 	moveq	#NSPR-1,d7
@@ -994,22 +1143,6 @@ mark_used:
 .x	move.l	d5,pv_used(a4)
 	rts
 
-; d6 = map row (not wrapped) -> d6 wrapped, a2 = its tile words. Uses d0-d1.
-row_ptr:
-	bsr.s	row_off
-	move.w	d0,d1
-	lsr.w	#8,d1
-	lsr.w	#4,d1			; 4K bank
-	cmp.b	rt_vars+RT_BGBANK(pc),d1
-	beq.s	.live
-	lea	bgram(pc),a2
-	add.w	d0,a2
-	rts
-.live	and.w	#$0fff,d0
-	lea	(ZC000,a5),a2		; the bank the Z80 sees at $C000
-	add.w	d0,a2
-	rts
-
 ; d6 = map row (not wrapped) -> d6 wrapped, d0 = its offset in the 16K. Uses d1.
 row_off:
 	tst.w	pv_layout(a4)
@@ -1032,54 +1165,46 @@ row_off:
 .rc	add.w	d1,d0			; byte offset of the row in the 16K
 	rts
 
-; check / draw the visible cells of map row d6 (not wrapped)
+; check / draw the visible cells of map row d6 (not wrapped); a2 = its tile
+; words in tilebuf (moves on to the next row)
 bg_row:
 	move.w	d6,d5
 	and.w	#15,d5			; buffer slot
-	bsr	row_off
-	move.w	d0,d3			; row offset in the 16K
-	lea	colpart(pc),a0
-	tst.w	pv_layout(a4)
-	beq.s	.cl0
-	lea	256(a0),a0
-.cl0	lea	mshoff(pc),a1
+	bsr	row_off			; (d6 wrapped)
+	lea	mshoff(pc),a1
 	move.l	pv_sh(a4),a3
 	move.w	d5,d0
 	mulu.w	#NCOLSLOT*4,d0
 	add.w	d0,a3			; shadow of this slot
+	moveq	#0,d3
+	tst.b	pv_bgoff(a4)
+	sne	d3			; background off: blank cells
 	bsr	view_cols
 	add.w	#COLBIAS,d4		; memory column
-.col	move.w	d4,d1
-	sub.w	#COLBIAS,d1
-	and.w	pv_cmask(a4),d1
-	move.w	(a0,d1.w*2),d1
-	add.w	d3,d1			; offset in the 16K
-	move.w	#$2700,sr		; (no bank switch by the game in between)
-	move.w	d1,d2
-	lsr.w	#8,d2
-	lsr.w	#4,d2
-	cmp.b	rt_vars+RT_BGBANK(pc),d2
-	beq.s	.live
-	lea	bgram(pc),a2
-	move.w	(a2,d1.w),d1		; tile word: code << 8 | attribute
-	bra.s	.got
-.live	and.w	#$0fff,d1
-	lea	(ZC000,a5),a2		; the bank the Z80 sees at $C000
-	move.w	(a2,d1.w),d1
-.got	move.w	#$2000,sr
-	move.w	(a1,d4.w*2),d2		; shadow offset
 	move.w	d6,d0
 	lsl.w	#8,d0
-	or.w	d4,d0
+	swap	d0			; key: row << 24 | column << 16 | tile
+.col	move.w	(a1,d4.w*2),d2		; shadow offset
 	swap	d0
-	move.w	d1,d0			; key: row << 24 | column << 16 | tile
-	tst.b	pv_bgoff(a4)
-	beq.s	.on
-	clr.w	d0
-	bset	#31,d0
-.on	cmp.l	(a3,d2.w),d0
+	move.b	d4,d0
+	swap	d0
+	tst.b	d3
+	bne.s	.off
+	move.w	(a2)+,d0
+	cmp.l	(a3,d2.w),d0
 	beq.s	.ok
+	bra.s	.draw
+.off	move.l	d0,d1
+	clr.w	d1
+	bset	#31,d1
+	cmp.l	(a3,d2.w),d1
+	beq.s	.ok
+	exg	d0,d1
 	move.l	d0,(a3,d2.w)
+	bsr	bg_draw
+	exg	d0,d1
+	bra.s	.ok
+.draw	move.l	d0,(a3,d2.w)
 	bsr	bg_draw
 .ok	addq.w	#1,d4
 	dbf	d7,.col
@@ -1138,6 +1263,7 @@ bg_draw:
 	rts
 
 colpart:	ds.w	256		; see init_display
+tilebuf:	ds.w	15*17		; visible tile words (read_tiles)
 mshoff:		ds.w	160
 
 ; d0.l = key (bit 31: blank cell, else the low word is code byte << 8 |
@@ -1362,16 +1488,22 @@ draw_bobs:
 	sub.w	#256,d2
 .xp	cmp.w	#-15,d2
 	blt	.next
-	moveq	#7,d0
-	and.w	d1,d0
-	add.w	#16,d0
-	bsr	get_slot
-	move.w	d0,d3			; slot
 	moveq	#0,d0
 	move.w	d1,d0
 	and.w	#$e0,d0
 	lsl.w	#3,d0
 	move.b	(a0),d0			; sprite number
+	lea	sprrows(pc),a1
+	move.w	(a1,d0.w*2),d3		; first row << 8 | rows (0: empty)
+	beq	.next
+	swap	d3
+	move.l	d0,d4
+	moveq	#7,d0
+	and.w	d1,d0
+	add.w	#16,d0
+	bsr	get_slot
+	move.w	d0,d3			; slot; the rows in the upper word
+	move.l	d4,d0
 	lea	sprmask(pc),a0
 	move.l	d0,d4
 	lsl.l	#5,d4
@@ -1382,7 +1514,18 @@ draw_bobs:
 	btst	#3,d1
 	beq.s	.nf
 	bsr	flip_sprite
-.nf	add.w	pv_vx(a4),d2
+.nf	swap	d3			; only the rows with pixels in them
+	moveq	#0,d0
+	move.b	d3,d0
+	move.w	d0,d4			; rows
+	lsr.w	#8,d3			; first row
+	add.w	d3,d5
+	add.w	d3,d3
+	add.w	d3,a0
+	add.w	d3,a1
+	move.w	d4,d3
+	swap	d3			; rows << 16 | slot
+	add.w	pv_vx(a4),d2
 	add.w	#COLBIAS*16,d2		; x in the buffer
 	moveq	#15,d4
 	and.w	d2,d4
@@ -1399,11 +1542,13 @@ draw_bobs:
 	add.l	pv_bm(a4),d0
 	add.l	d2,d0
 	move.l	d0,(a2)+		; REC_DEST
+	move.l	d3,d0
+	swap	d0			; rows
 	move.w	#BUFH,d1
 	sub.w	d5,d1			; lines before the buffer wraps
-	cmp.w	#16,d1
+	cmp.w	d0,d1
 	blo.s	.h
-	moveq	#16,d1
+	move.w	d0,d1
 .h	move.w	d1,(a2)+		; REC_H
 	move.w	d4,(a2)+		; REC_SHIFT
 	move.l	a0,(a2)+		; REC_MASK
@@ -1411,14 +1556,14 @@ draw_bobs:
 	move.w	d3,(a2)+		; REC_SLOT
 	addq.l	#2,a2
 	addq.w	#1,d7
-	cmp.w	#16,d1
+	cmp.w	d0,d1
 	beq.s	.next
-	move.l	pv_bm(a4),d0		; the rest from buffer line 0
+	sub.w	d1,d0			; the rest from buffer line 0
+	move.w	d0,-(sp)
+	move.l	pv_bm(a4),d0
 	add.l	d2,d0
 	move.l	d0,(a2)+
-	moveq	#16,d0
-	sub.w	d1,d0
-	move.w	d0,(a2)+
+	move.w	(sp)+,(a2)+
 	move.w	d4,(a2)+
 	add.w	d1,d1
 	lea	(a0,d1.w),a0
@@ -1540,6 +1685,7 @@ update_palette:
 	bsr	pal_rgb
 	move.w	d0,(a2)
 	move.w	#2,pv_paldirty(a4)	; both copper lists
+	addq.w	#1,pv_textver(a4)
 	rts
 ; 16 colours from palette entry d3 to (a2); pen 15 (transparent) is the backdrop
 .pal16	moveq	#14,d4
@@ -1694,6 +1840,19 @@ build_copper:
 	addq.w	#1,d7
 	cmp.w	#8,d7
 	bne.s	.spr
+
+	; the rest (text colours, buffer wrap) only when it changed for this list
+	move.w	#BUFH-1,d6
+	sub.w	pv_vy(a4),d6
+	and.w	#255,d6
+	swap	d6
+	move.w	pv_textver(a4),d6
+	lea	pv_csig(a4),a2
+	move.w	pv_back(a4),d0
+	cmp.l	(a2,d0.w*4),d6
+	bne.s	.text
+	rts
+.text	move.l	d6,(a2,d0.w*4)
 
 	; per character row: text colours, merged with the buffer wrap: the modulo
 	; jumps back on line wset and is restored on line wrest
@@ -1864,7 +2023,8 @@ bgtiles		equ	z80banks+16*16384
 sprites		equ	bgtiles+2048*128
 chars		equ	sprites+2048*128
 sprmask		equ	chars+2048*16
-z80mem		equ	sprmask+2048*32
+sprrows		equ	sprmask+2048*32		; per sprite: first row << 8 | rows
+z80mem		equ	sprrows+2048*2
 bgram		equ	z80mem+65536
 task_stacks	equ	bgram+16384
 bgshadow0	equ	task_stacks+16*1024
