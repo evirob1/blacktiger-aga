@@ -33,6 +33,12 @@ PLAT_EI	macro				; the harness raises interrupts itself
 
 	include	"rt_core.s"
 
+bg_mark_d2:				; (the A1200 display notes background writes)
+bg_mark_d3:
+bg_mark_up:
+bg_mark_down:
+	rts
+
 z80_ei:
 	st	RT_IE(a4)
 	rts

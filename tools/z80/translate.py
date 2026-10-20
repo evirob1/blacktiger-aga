@@ -189,7 +189,8 @@ class Translator:
             m = re.search(r"\((-?\d+,)?a6,(d\d)\.w\)", l)
             if m:
                 new = l[:m.start()] + "(%sa0,%s.w)" % (m.group(1) or "", m.group(2)) + l[m.end():]
-                t.lines = t.lines[:i] + self.select_base(m.group(2)) + [new] + t.lines[i + 1:]
+                after = ["bsr bg_mark_%s" % m.group(2)] if key in self.bg_stores else []
+                t.lines = t.lines[:i] + self.select_base(m.group(2)) + [new] + after + t.lines[i + 1:]
                 t.clob |= CCR_MOVE      # cmpa: the flag analysis saves them where needed
                 return t
         self.problems.append("%s: no indexed operand to make bank-aware (%s)" % (label(*key), ins.text))
@@ -422,14 +423,15 @@ class Translator:
             # source and destination bases chosen once (a2 = DE' meanwhile on the stack)
             s = self.tmp()
             q = "addq" if op == "ldir" else "subq"
-            return T(["move.l a2,-(sp)"] + self.select_base("d2", "a2") + self.select_base("d3") +
+            return T(["bsr bg_mark_%s" % ("up" if op == "ldir" else "down"), "move.l a2,-(sp)"] +
+                     self.select_base("d2", "a2") + self.select_base("d3") +
                      [s + ":", "move.b (a0,d3.w),(a2,d2.w)",
                       "%s.w #1,d3" % q, "%s.w #1,d2" % q, "subq.w #1,d1", "bne.s %s" % s,
                       "movea.l (sp)+,a2"],
                      defs=V, ok=0, clob=ALL)
         if op in ("ldi", "ldd"):
             q = "addq" if op == "ldi" else "subq"
-            return T(["move.l a2,-(sp)"] + self.select_base("d2", "a2") + self.select_base("d3") +
+            return T(["bsr bg_mark_d2", "move.l a2,-(sp)"] + self.select_base("d2", "a2") + self.select_base("d3") +
                      ["move.b (a0,d3.w),(a2,d2.w)", "movea.l (sp)+,a2", "%s.w #1,d3" % q,
                       "%s.w #1,d2" % q, "subq.w #1,d1"], defs=V, ok=0, clob=ALL)
         if op in ("cpir", "cpdr", "cpi", "cpd", "ini", "ind", "inir", "indr", "outi", "outd",

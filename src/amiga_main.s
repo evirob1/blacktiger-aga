@@ -123,6 +123,16 @@ MAXBOB		equ	64			; sprites drawn per frame at most
 BMSIZE		equ	PLANEALLOC*NPLANES
 SHSIZE		equ	16*NCOLSLOT*4		; background shadow per buffer
 RECSIZE		equ	2*MAXBOB*REC_SIZE
+BS_GEN		equ	0			; l  pv_bggen at the buffer's last scan
+BS_INV		equ	4			; w  pv_invgen then
+BS_R0		equ	6			; w  view: first / last map row, column (not wrapped)
+BS_R1		equ	8
+BS_C0		equ	10
+BS_C1		equ	12
+BS_LAY		equ	14			; w  layout
+BS_OFF		equ	16			; b  background off
+BS_MASK		equ	18			; 16 x w  palettes in each buffer slot row
+BS_SIZE		equ	50
 
 ; platform variables (a4 relative inside the display code)
 		rsreset
@@ -147,6 +157,14 @@ pv_txhalf	rs.w	1			; text rows checked this frame: 0, 7, 14, 21
 pv_palhalf	rs.b	1			; palette half checked this frame
 		rs.b	1
 pv_chgend	rs.l	1			; end of chglist
+pv_bggen	rs.l	1			; background RAM write generation (bg_mark)
+pv_scangen	rs.l	1			; ... as seen by the scan in progress
+pv_invgen	rs.w	1			; shadows invalidated (forget_pal / forget_all)
+pv_full		rs.b	1			; scan in progress looks at every cell
+		rs.b	1
+pv_srow		rs.w	1			; map row being scanned (wrapped)
+pv_usedacc	rs.l	1			; background palettes on screen
+pv_bstate	rs.b	NBUF*BS_SIZE		; per buffer: what its last scan saw
 pv_layout	rs.w	1			; 0: 64 x 128 tiles, 1: 128 x 64 (port $0E)
 pv_cmask	rs.w	1			; map width in tiles - 1
 pv_vx		rs.w	1			; view position in the map (pixels, signed)
@@ -666,6 +684,11 @@ init_display:
 	addq.w	#1,d0
 	cmp.w	#160,d0
 	bne.s	.ms
+	lea	pv_bstate(a4),a0	; no scans yet: the first ones look at every cell
+	moveq	#NBUF-1,d0
+.bs	move.w	#-1,BS_INV(a0)
+	lea	BS_SIZE(a0),a0
+	dbf	d0,.bs
 	lea	fliptag(pc),a0		; flip cache empty
 	moveq	#64-1,d0
 .ft	move.l	#$ffff0000,(a0)+
@@ -1059,9 +1082,10 @@ get_slot:
 	movem.l	(sp)+,d1-d3/a0
 	rts
 
-; d2 = background palette: forget the cells drawn with it in both buffers
+; d2 = background palette: forget the cells drawn with it in all buffers
 forget_pal:
 	movem.l	d0-d1/a0,-(sp)
+	addq.w	#1,pv_invgen(a4)
 	lea	bgshadow0(pc),a0
 	move.w	#NBUF*16*NCOLSLOT-1,d1
 .l	move.l	(a0)+,d0
@@ -1075,6 +1099,7 @@ forget_pal:
 	rts
 
 forget_all:
+	addq.w	#1,pv_invgen(a4)
 	lea	bgshadow0(pc),a0
 	move.w	#NBUF*16*NCOLSLOT-1,d1
 .l	move.l	#-1,(a0)+
@@ -1126,6 +1151,8 @@ update_background:
 	moveq	#2,d0
 	and.b	pv_iod+$c(a4),d0
 	sne	pv_bgoff(a4)		; background off: blank cells
+	lea	chglist(pc),a0
+	move.l	a0,pv_chgend(a4)
 	bsr	scan_tiles
 	bsr	mark_sprites
 	bsr	blit_setup
@@ -1169,7 +1196,24 @@ view_cols:
 ; shadow; the ones that differ go to chglist (key, shadow offset, memory
 ; column, buffer slot). Their palettes -> d5.
 scan_tiles:
-	moveq	#0,d5
+	move.w	pv_back(a4),d0		; a5: this buffer's scan state
+	mulu.w	#BS_SIZE,d0
+	lea	pv_bstate(a4),a5
+	add.w	d0,a5
+	move.l	pv_bggen(a4),pv_scangen(a4)
+	clr.l	pv_usedacc(a4)
+	move.w	pv_invgen(a4),d0	; look at every cell if the shadow was invalidated,
+	cmp.w	BS_INV(a5),d0		; the layout changed or the background was switched
+	sne	d1			; on or off
+	move.w	pv_layout(a4),d0
+	cmp.w	BS_LAY(a5),d0
+	sne	d0
+	or.b	d0,d1
+	move.b	pv_bgoff(a4),d0
+	cmp.b	BS_OFF(a5),d0
+	sne	d0
+	or.b	d0,d1
+	move.b	d1,pv_full(a4)
 	lea	chglist(pc),a6
 	lea	colpart(pc),a0
 	tst.w	pv_layout(a4)
@@ -1185,16 +1229,102 @@ scan_tiles:
 	move.l	pv_sh(a4),a3
 	add.w	d0,a3			; shadow of the buffer slot
 	bsr	row_off			; (d6 wrapped)
+	move.w	d6,pv_srow(a4)
 	lea	bgram(pc),a2		; (all four banks: the Z80 window isn't used)
 	add.w	d0,a2
+	bsr	view_cols		; d4 first column, d7 columns - 1
+	moveq	#0,d5
+	tst.b	pv_full(a4)
+	bne	.all
+	move.w	(sp),d6			; (row, not wrapped)
+	cmp.w	BS_R0(a5),d6
+	blt.s	.all			; the row wasn't on screen
+	cmp.w	BS_R1(a5),d6
+	bgt.s	.all
+	move.w	d4,d1			; written since? (the visible columns lie in two
+	and.w	d3,d1			; groups of 16 tiles of the row)
+	move.w	(a0,d1.w*2),d1
+	add.w	d0,d1
+	lsr.w	#5,d1
+	lea	grpgen(pc),a6
+	move.l	(a6,d1.w*4),d1
+	cmp.l	BS_GEN(a5),d1
+	bhi.s	.alla6
+	move.w	d4,d1
+	add.w	d7,d1
+	and.w	d3,d1
+	move.w	(a0,d1.w*2),d1
+	add.w	d0,d1
+	lsr.w	#5,d1
+	move.l	(a6,d1.w*4),d1
+	cmp.l	BS_GEN(a5),d1
+	bhi.s	.alla6
+	move.l	pv_chgend(a4),a6	; (chglist pointer: kept in pv_chgend meanwhile)
+	move.w	a1,d1			; the row is as it was: only the columns that
+	add.w	d1,d1			; weren't on screen
+	move.w	BS_MASK(a5,d1.w),d5
+	move.w	d4,d6			; c0 .. min(c1, old c0 - 1)
+	add.w	d7,d6			; d6 = c1
+	move.w	d6,-(sp)
+	move.w	BS_C0(a5),d1
+	subq.w	#1,d1
+	cmp.w	d6,d1
+	bge.s	.p1
+	move.w	d1,d6
+.p1	sub.w	d4,d6			; count - 1
+	bmi.s	.p2
+	move.w	d4,-(sp)
+	move.w	d6,d7
+	bsr	scan_cols
+	move.w	(sp)+,d4
+.p2	move.w	(sp)+,d6		; c1
+	move.w	BS_C1(a5),d1		; max(c0, old c1 + 1) .. c1
+	addq.w	#1,d1
+	cmp.w	d4,d1
+	ble.s	.p3
+	move.w	d1,d4
+.p3	move.w	d6,d7
+	sub.w	d4,d7
+	bmi.s	.rdone
+	bsr	scan_cols
+	bra.s	.rdone
+.alla6	move.l	pv_chgend(a4),a6
+.all	bsr	scan_cols		; the whole row
+.rdone	move.w	a1,d1
+	add.w	d1,d1
+	move.w	d5,BS_MASK(a5,d1.w)
+	or.w	d5,pv_usedacc+2(a4)
+	move.l	a6,pv_chgend(a4)
+	movem.w	(sp)+,d6-d7
+	addq.w	#1,d6
+	dbf	d7,.row
+	move.l	pv_scangen(a4),BS_GEN(a5)	; what this buffer shows now
+	move.w	pv_invgen(a4),BS_INV(a5)
+	bsr	view_rows
+	move.w	d6,BS_R0(a5)
+	add.w	d7,d6
+	move.w	d6,BS_R1(a5)
 	bsr	view_cols
-	move.w	d6,d0			; key: row << 24 | memory column << 16 | tile
+	move.w	d4,BS_C0(a5)
+	add.w	d7,d4
+	move.w	d4,BS_C1(a5)
+	move.w	pv_layout(a4),BS_LAY(a5)
+	move.b	pv_bgoff(a4),BS_OFF(a5)
+	move.l	pv_usedacc(a4),d5
+	lea	CUSTOM,a6
+	lea	z80mem+$8000(pc),a5
+	rts
+
+; cells d4 .. d4 + d7 of the row being scanned (columns not wrapped): key
+; against the shadow, changes to chglist (a6), palettes -> d5. a0 colpart,
+; a1 buffer slot, a2 the row's tile words, a3 its shadow, d3 column mask.
+scan_cols:
+	move.w	pv_srow(a4),d0		; key: row << 24 | memory column << 16 | tile
 	lsl.w	#8,d0
 	move.b	d4,d0
 	add.b	#COLBIAS,d0
 	swap	d0
-	lea	mshoff+2*COLBIAS(pc),a5
-	move.w	(a5,d4.w*2),d2		; shadow offset, then stepped
+	move.w	mshoff+2*COLBIAS(pc,d4.w*2),d2	; shadow offset, then stepped
 	move.w	d4,d1
 	and.w	d3,d1
 	move.w	(a0,d1.w*2),d1		; tile offset in the row, then stepped
@@ -1207,7 +1337,7 @@ scan_tiles:
 	lsr.b	#3,d6
 	and.w	#15,d6
 	bset	d6,d5
-.nx	add.l	#$10000,d0
+	add.l	#$10000,d0
 	addq.w	#2,d1
 	addq.w	#4,d2
 	cmp.w	#NCOLSLOT*4,d2
@@ -1221,12 +1351,6 @@ scan_tiles:
 	and.w	d3,d1
 	move.w	(a0,d1.w*2),d1
 .s2	dbf	d7,.col
-.rx	lea	z80mem+$8000(pc),a5
-	movem.w	(sp)+,d6-d7
-	addq.w	#1,d6
-	dbf	d7,.row
-	move.l	a6,pv_chgend(a4)
-	lea	CUSTOM,a6
 	rts
 .chg	bsr.s	.add
 	bra.s	.mk
@@ -1242,13 +1366,71 @@ scan_tiles:
 	moveq	#0,d2
 .o1	addq.w	#1,d4
 	dbf	d7,.oc
-	bra.s	.rx
+	rts
 .add	move.l	d0,(a6)+		; to chglist
 	move.w	d2,(a6)+
 	move.w	d4,d6
 	add.w	#COLBIAS,d6
 	move.w	d6,(a6)+		; memory column
 	move.w	a1,(a6)+		; buffer slot
+	rts
+
+; Background RAM writes by the game (bg_stores.txt sites and block moves):
+; the 32-byte group (16 tiles of one row) gets the next generation number,
+; so the scans know what changed. d0.w = Z80 address; keeps all registers.
+bg_mark_d2:
+	move.l	d0,-(sp)
+	move.w	d2,d0
+	bra.s	bg_mark0
+bg_mark_d3:
+	move.l	d0,-(sp)
+	move.w	d3,d0
+bg_mark0:
+	bsr.s	bg_mark
+	move.l	(sp)+,d0
+	rts
+bg_mark:
+	cmp.w	#$c000,d0
+	blo.s	.x
+	cmp.w	#$d000,d0
+	bhs.s	.x
+	movem.l	d0-d1/a0,-(sp)
+	and.w	#$0fff,d0
+	moveq	#3,d1
+	and.b	rt_vars+RT_BGBANK(pc),d1
+	lsl.w	#8,d1
+	lsl.w	#4,d1
+	or.w	d1,d0
+	lsr.w	#5,d0			; group 0-511
+	lea	pvars(pc),a0
+	addq.l	#1,pv_bggen(a0)
+	move.l	pv_bggen(a0),d1
+	lea	grpgen(pc),a0
+	move.l	d1,(a0,d0.w*4)
+	movem.l	(sp)+,d0-d1/a0
+.x	rts
+
+; block move about to write d1 bytes from d2 up (ldir) / down (lddr)
+bg_mark_up:
+	movem.l	d0-d1,-(sp)
+	move.w	d2,d0
+	bra.s	bg_mark_blk
+bg_mark_down:
+	movem.l	d0-d1,-(sp)
+	move.w	d2,d0
+	sub.w	d1,d0
+	addq.w	#1,d0			; lowest address
+bg_mark_blk:
+	subq.w	#1,d1
+	add.w	d0,d1			; highest address
+.l	bsr.s	bg_mark
+	add.w	#32,d0
+	bcs.s	.e
+	cmp.w	d1,d0
+	bls.s	.l
+.e	move.w	d1,d0
+	bsr.s	bg_mark
+	movem.l	(sp)+,d0-d1
 	rts
 
 ; sprite palettes on screen -> d5, then pv_used (before any slot is given out)
@@ -1356,12 +1538,14 @@ bg_draw:
 	mulu.w	#NCOLSLOT*4,d1
 	add.w	d2,d1
 	move.l	#-1,(a3,d1.w)
+	addq.w	#1,pv_invgen(a4)
 .x
 	movem.l	(sp)+,d0-d7/a0/a2-a3
 	rts
 
 colpart:	ds.w	256		; see init_display
 chglist:	ds.b	15*17*10	; cells to draw (scan_tiles)
+grpgen:		ds.l	512		; per 32 bytes of background RAM: generation of the last write
 mshoff:		ds.w	160
 
 ; d0.l = key (bit 31: blank cell, else the low word is code byte << 8 |
