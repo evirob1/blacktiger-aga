@@ -459,33 +459,42 @@ def object_scripts(cm):
     3 bytes on), FF + address (go to that script), FE (end). Try every
     address a word in the same bank points at (and 3 / 5 bytes on, as objects
     keep their place in a script): a walk that ends properly, stays in the
-    bank and whose every code address reads as code gives code entries."""
+    bank and whose every code address reads as code gives code entries. Code
+    may be a known routine in the fixed ROM, and may not come back (the
+    boss's death script calls the end of level, $5A4F, in
+    data/code_entries.txt): a script may end with a code call."""
     code = cm.code_bytes()
 
     def walk(bank, start, sp):
         seen, todo, codes, n, ended = set(), [start], set(), 0, False
         while todo:
             a = todo.pop()
+            called = False
             while True:
                 if a in seen:
                     ended = True
                     break
                 if not 0x8000 <= a < 0xBFFB or loc(bank, a) in code:
+                    if called:              # (that code doesn't come back)
+                        ended = True
+                        break
                     return None
                 seen.add(a)
                 n += 1
                 if n > 100:
                     return None
                 b = sp[a]
+                called = False
                 if b in (0x00, 0xFF):
                     w = sp[a + 1] | sp[a + 2] << 8
-                    if not 0x8000 <= w < 0xC000:
-                        return None
+                    if not (0x8000 <= w < 0xC000 or (b == 0x00 and (None, w) in cm.insns)):
+                        return None         # (fixed ROM: only known routines)
                     if b == 0xFF:
                         todo.append(w)
                         ended = True
                         break
-                    codes.add(w)
+                    codes.add(loc(bank, w))
+                    called = True
                     a += 3
                 elif b == 0xFE:
                     ended = True
@@ -505,10 +514,10 @@ def object_scripts(cm):
         for r in refs:
             for d in (0, 3, 5):
                 c = walk(bank, r + d, sp)
-                if c and all((bank, w) in cm.insns or (_looks_like_code(cm, bank, w, strict=True) and
-                                                         _closure_ok(cm, bank, w)) for w in c):
-                    found.update((bank, w) for w in c)
-    for k in sorted(found):
+                if c and all(k in cm.insns or (_looks_like_code(cm, k[0], k[1], strict=True) and
+                                               _closure_ok(cm, k[0], k[1])) for k in c):
+                    found.update(c)
+    for k in sorted(found, key=lambda k: (-1 if k[0] is None else k[0], k[1])):
         if k not in cm.insns:
             cm.entries.add(k)
             cm.add(*k)

@@ -448,7 +448,8 @@ bad_text:
 	move.l	a3,a1
 	moveq	#7,d3
 .l	move.b	(a0)+,d0
-	or.b	(a0)+,d0		; any pen but the transparent one
+	and.b	(a0)+,d0		; any pen but the transparent one (3)
+	not.b	d0
 	moveq	#0,d1
 	moveq	#7,d2
 .b	add.b	d0,d0			; each pixel twice
