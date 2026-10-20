@@ -29,6 +29,21 @@ static unsigned long long in_lev3, lev3_start;
 static int in_irq;
 static unsigned int lev3_addr;
 
+/* chip RAM: BT_CHIPWAIT extra 68k cycles for every data access and every
+   instruction fetch that misses the 68020's cache (64 longwords, direct
+   mapped); BT_FASTRAM=hex address: from there on it's fast RAM (no wait) */
+static unsigned long long xcyc;
+static int chipwait;
+static unsigned int fast_from = 0xffffffff;
+static unsigned int ic_tag[64];
+static unsigned long long T(void) { return now + m68k_cycles_run() + xcyc; }
+static void waitd(unsigned int a) { if (a < fast_from || a >= 0xbf0000) xcyc += chipwait; }
+static void fetch(unsigned int a)
+{
+    unsigned int l = (a >> 2) & 63, tag = a >> 8 | 0x80000000;
+    if (ic_tag[l] != tag) { ic_tag[l] = tag; if (a < fast_from) xcyc += chipwait; }
+}
+
 static unsigned int rd8(unsigned int a) { return mem[a & (MEMSIZE - 1)]; }
 static unsigned int rd16(unsigned int a) { return rd8(a) << 8 | rd8(a + 1); }
 static unsigned int rd32(unsigned int a) { return rd16(a) << 16 | rd16(a + 2); }
@@ -41,7 +56,7 @@ static unsigned long long blit_busy;
 static unsigned int custom_read(unsigned int reg)
 {
     switch (reg & 0x1fe) {
-    case 0x002: return now + m68k_cycles_run() < blit_busy ? 0x4000 : 0;   /* DMACONR: BBUSY */
+    case 0x002: return T() < blit_busy ? 0x4000 : 0;   /* DMACONR: BBUSY */
     case 0x004: return 0;                          /* VPOSR */
     case 0x006: return (unsigned int)(now / 64) & 0xffff;   /* VHPOSR moves */
     case 0x016: return 0xffff;                     /* POTINP: buttons up */
@@ -68,6 +83,7 @@ static void stale_check(unsigned int a)
 unsigned int m68k_read_memory_8(unsigned int a)
 {
     a &= 0xffffff;
+    waitd(a);
     stale_check(a);
     if (a >= 0xdff000 && a < 0xdff200) return (a & 1) ? custom_read(a) & 0xff : custom_read(a) >> 8;
     if (a >= 0xbfd000 && a < 0xbff000) return 0xff;
@@ -76,11 +92,17 @@ unsigned int m68k_read_memory_8(unsigned int a)
 unsigned int m68k_read_memory_16(unsigned int a)
 {
     a &= 0xffffff;
+    waitd(a);
     stale_check(a);
     if (a >= 0xdff000 && a < 0xdff200) return custom_read(a);
     return rd16(a);
 }
-unsigned int m68k_read_memory_32(unsigned int a) { return m68k_read_memory_16(a) << 16 | m68k_read_memory_16(a + 2); }
+unsigned int m68k_read_memory_32(unsigned int a) { xcyc -= (a & 0xffffff) < fast_from ? chipwait : 0; return m68k_read_memory_16(a) << 16 | m68k_read_memory_16(a + 2); }
+unsigned int m68k_read_immediate_16(unsigned int a) { fetch(a & 0xffffff); return rd16(a & 0xffffff); }
+unsigned int m68k_read_immediate_32(unsigned int a) { fetch(a & 0xffffff); fetch((a + 2) & 0xffffff); return rd32(a & 0xffffff); }
+unsigned int m68k_read_pcrelative_8(unsigned int a) { return m68k_read_memory_8(a); }
+unsigned int m68k_read_pcrelative_16(unsigned int a) { return m68k_read_memory_16(a); }
+unsigned int m68k_read_pcrelative_32(unsigned int a) { return m68k_read_memory_32(a); }
 unsigned int m68k_read_disassembler_16(unsigned int a) { return rd16(a); }
 unsigned int m68k_read_disassembler_32(unsigned int a) { return rd32(a); }
 
@@ -103,7 +125,7 @@ static void blit(void)
     unsigned int aold = 0, bold = 0;
     if (con1 & 1) { printf("line mode blit not emulated\n"); exit(1); }
     int nch = !!(con0 & 0x800) + !!(con0 & 0x400) + !!(con0 & 0x200) + !!(con0 & 0x100);
-    blit_busy = now + m68k_cycles_run() + (unsigned long long)h * w * (nch < 2 ? 2 : nch) * BLIT_CYC;
+    blit_busy = T() + (unsigned long long)h * w * (nch < 2 ? 2 : nch) * BLIT_CYC;
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             unsigned int a = adat, b = bdat, c = cdat, d = 0;
@@ -156,6 +178,7 @@ static void custom_write(unsigned int reg, unsigned int v)
 void m68k_write_memory_8(unsigned int a, unsigned int v)
 {
     a &= 0xffffff;
+    waitd(a);
     if (a >= 0xdff000 && a < 0xdff200) return;
     if (a >= 0xbfd000 && a < 0xbff000) return;
     mem[a] = v;
@@ -163,12 +186,14 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
 void m68k_write_memory_16(unsigned int a, unsigned int v)
 {
     a &= 0xffffff;
+    waitd(a);
     if (a >= 0xdff000 && a < 0xdff200) { custom_write(a, v); return; }
     mem[a] = v >> 8;
     mem[a + 1] = v;
 }
 void m68k_write_memory_32(unsigned int a, unsigned int v)
 {
+    xcyc -= (a & 0xffffff) < fast_from ? chipwait : 0;   /* one 32-bit access */
     m68k_write_memory_16(a, v >> 16);
     m68k_write_memory_16(a + 2, v & 0xffff);
 }
@@ -187,12 +212,12 @@ static unsigned long long disp_cycles, hook_last;
 void harness_hook(unsigned int pc)
 {
     if (indisp_addr) {
-        unsigned long long t = now + m68k_cycles_run();
+        unsigned long long t = T();
         if (mem[indisp_addr]) disp_cycles += t - hook_last;
         hook_last = t;
     }
     /* the vertical blank arrives at its exact cycle, between any two instructions */
-    if (!vbl_due && now + m68k_cycles_run() >= next_vbl) {
+    if (!vbl_due && T() >= next_vbl) {
         vbl_due = 1;
         irq_pending = 1;
         m68k_set_irq(3);
@@ -200,16 +225,16 @@ void harness_hook(unsigned int pc)
     }
     for (int i = 0; i < nprobes; i++)
         if (pc == probes[i]) {
-            unsigned long long t = now + m68k_cycles_run();
+            unsigned long long t = T();
             if (last_probe >= 0 && i == last_probe + 1) { probe_sum[last_probe] += t - probe_t; probe_n[last_probe]++; }
             last_probe = i;
             probe_t = t;
         }
-    if (pc == lev3_addr && !in_irq) { in_irq = 1; lev3_start = now; }
+    if (pc == lev3_addr && !in_irq) { in_irq = 1; lev3_start = T(); }
     if (in_irq && rd16(pc) == 0x4e73) {             /* rte */
         unsigned int sp = m68k_get_reg(NULL, M68K_REG_SP);
         (void)sp;
-        in_lev3 += now - lev3_start;
+        in_lev3 += T() - lev3_start;
         in_irq = 0;
     }
 }
@@ -283,6 +308,8 @@ int main(int argc, char **argv)
         }
     }
     if (getenv("BT_BLIT_CYC")) BLIT_CYC = atoi(getenv("BT_BLIT_CYC"));
+    if (getenv("BT_CHIPWAIT")) chipwait = atoi(getenv("BT_CHIPWAIT"));
+    if (getenv("BT_FASTRAM")) fast_from = (unsigned int)strtoul(getenv("BT_FASTRAM"), NULL, 16);
     if (getenv("BT_INDISP")) indisp_addr = BASE + (unsigned int)strtoul(getenv("BT_INDISP"), NULL, 16);
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68020);
@@ -326,6 +353,12 @@ int main(int argc, char **argv)
                        (drawn - last_drawn) & 0xffff, m68k_get_reg(NULL, M68K_REG_PC) - BASE);
                 disp_cycles = 0;
                 last_drawn = drawn;
+                if (getenv("BT_OVL")) {
+                    static unsigned int last_ovl;
+                    unsigned int o = rd16(BASE + (unsigned int)strtoul(getenv("BT_OVL"), NULL, 16));
+                    if (o != last_ovl) printf("  colour slots borrowed: %u\n", (o - last_ovl) & 0xffff);
+                    last_ovl = o;
+                }
                 in_lev3 = 0;
                 z80_frames = 0;
                 if (dumpi < argc && atoi(argv[dumpi]) == frame / FPS) {

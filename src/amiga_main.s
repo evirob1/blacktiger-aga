@@ -155,7 +155,10 @@ pv_sh		rs.l	1			; its background shadow
 pv_rec		rs.l	1			; its blitter objects
 pv_save		rs.l	1			; the background saved under them
 pv_used		rs.l	1			; palettes on screen this frame
-pv_rr		rs.w	1
+pv_overload	rs.w	1			; slots borrowed (count, for amiga_sim)
+pv_borrowed	rs.b	1			; the last get_slot borrowed a slot
+pv_dbusy	rs.b	1			; the display is in the middle of a frame
+pv_starve	rs.w	1			; vblanks since the display finished a frame
 pv_paldirty	rs.w	1			; copper lists whose palette section is stale
 pv_rowpal	rs.b	TXROWS*8		; text palette per row and sprite
 pv_rgb		rs.w	256			; background colours, 12 bit (pen 15: backdrop)
@@ -419,7 +422,18 @@ lev3:
 	bra.s	.done
 .pend	st	RT_PENDING(a4)
 .done	move.l	a1,9*4(sp)		; (the interrupt may switch the ROM bank)
-	movem.l	(sp)+,d0-d7/a0-a6
+	lea	pvars(pc),a4		; no frame drawn for 3 vblanks (the game uses all
+	cmp.w	#3,pv_starve(a4)	; the time): the display goes first now, the game
+	blo.s	.ret			; slows down instead (as the arcade does)
+	tst.b	pv_dwork(a4)
+	bne.s	.disp
+	tst.b	pv_dbusy(a4)
+	beq.s	.ret
+.disp	lea	ctx_g(pc),a0
+	move.l	sp,(a0)
+	st	pv_indisp(a4)
+	move.l	ctx_d(pc),sp
+.ret	movem.l	(sp)+,d0-d7/a0-a6
 	rte
 .other	move.w	#$0050,CUSTOM+INTREQ	; copper / blitter
 	rte
@@ -748,6 +762,7 @@ vblank_quick:
 .sh	move.w	d0,pv_shown(a4)
 	move.w	#-1,pv_queued(a4)
 .n	st	pv_dwork(a4)
+	addq.w	#1,pv_starve(a4)
 	rts
 
 ; one frame, into a buffer neither on screen nor queued; its copper list is
@@ -760,6 +775,7 @@ draw_frame:
 	lea	CUSTOM,a6
 	move.w	#$2700,sr		; sprite RAM as buffered by the game
 	sf	pv_dwork(a4)
+	st	pv_dbusy(a4)
 	lea	pv_sprbuf(a4),a0	; with the I/O registers of the same moment
 	lea	pv_sprsnap(a4),a2	; (scroll, layout, video enables)
 	moveq	#NSPR-1,d0
@@ -793,6 +809,8 @@ draw_frame:
 	btst	#5,INTREQR+1(a6)	; that one has begun already: the one after
 	sne	d0
 	move.w	d0,pv_qdelay(a4)
+	sf	pv_dbusy(a4)
+	clr.w	pv_starve(a4)
 	move.w	#$2000,sr
 	addq.w	#1,pv_drawn(a4)
 	rts
@@ -1003,12 +1021,18 @@ get_slot:
 	btst	d2,d3
 	beq.s	.evict
 	dbf	d1,.idle
-	move.w	pv_rr(a4),d1		; more than 15 palettes on screen: take any
-	addq.w	#1,d1
-	cmp.w	#NSLOTS,d1
-	blo.s	.rr
+	; more palettes on screen than slots: borrow a slot of the same kind
+	; (background / sprite) for this frame, without taking it away
+	addq.w	#1,pv_overload(a4)
+	st	pv_borrowed(a4)
+	moveq	#NSLOTS-1,d1
+.bw	move.b	(a0,d1.w),d2
+	eor.b	d0,d2
+	and.b	#$10,d2			; same kind?
+	beq.s	.have
+	dbf	d1,.bw
 	moveq	#0,d1
-.rr	move.w	d1,pv_rr(a4)
+	bra.s	.have
 .evict	moveq	#0,d2
 	move.b	(a0,d1.w),d2
 	st	pv_slot_of(a4,d2.w)
@@ -1310,7 +1334,15 @@ bg_draw:
 	add.l	d1,a0
 	add.w	d4,a0
 	add.w	d4,a0			; + column * 2
+	sf	pv_borrowed(a4)
 	bsr	draw_tile
+	tst.b	pv_borrowed(a4)		; drawn with a borrowed slot: again next frame
+	beq.s	.x
+	move.w	d5,d1
+	mulu.w	#NCOLSLOT*4,d1
+	add.w	d2,d1
+	move.l	#-1,(a3,d1.w)
+.x
 	movem.l	(sp)+,d0-d7/a0/a2-a3
 	rts
 

@@ -161,6 +161,7 @@ def build(rom, dynamic_path=None):
         data_pointers(cm)
         gap_routines(cm)
         bank_entry_tables(cm)
+        object_handlers(cm)
         multiway_returns(cm)
         if len(cm.insns) == n:
             break
@@ -420,6 +421,31 @@ def data_pointers(cm):
         for k in sorted(found, key=lambda k: (k[0] if k[0] is not None else -1, k[1])):
             cm.entries.add(k)
             cm.add(*k)
+
+
+HANDLER_PREFIX = bytes([0x2A, 0x27, 0xE9, 0x7E, 0xA7, 0xC0])   # ld hl,($e927) / ld a,(hl) / and a / ret nz
+
+
+def object_handlers(cm):
+    """Object handlers start with HANDLER_PREFIX and are only reached through
+    level data and object scripts (entered at the start, or at the
+    instruction after the prefix): take every such routine outside the known
+    code that reads as code."""
+    code = cm.code_bytes()
+    for bank in [None] + list(range(16)):
+        sp = Space(cm.rom, bank)
+        lo, hi = (0, 0x8000) if bank is None else (0x8000, 0xC000)
+        data = bytes(sp[a] for a in range(lo, hi))
+        i = data.find(HANDLER_PREFIX)
+        while i >= 0:
+            a = lo + i
+            k = loc(bank, a)
+            if k not in code and _closure_ok(cm, bank, a):
+                for e in (k, loc(bank, a + len(HANDLER_PREFIX))):
+                    cm.entries.add(e)
+                    cm.add(*e)
+                code = cm.code_bytes()
+            i = data.find(HANDLER_PREFIX, i + 1)
 
 
 def bank_entry_tables(cm):
