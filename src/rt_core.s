@@ -42,7 +42,8 @@ RT_ALT_F	equ	6	; w  F' (as a 68k CCR)
 RT_TASK_SP	equ	8	; 16 x l  68k stack of each sleeping task
 RT_ALT_BC	equ	72	; w  BC'
 RT_BGPTR	equ	74	; l  bgram + bank * $1000 + $4000: (RT_BGPTR, Z80 address.w)
-RT_SIZE		equ	78
+RT_JPFROM	equ	78	; l  bank << 16 | address of the last jp (hl)/(ix)/(iy)
+RT_SIZE		equ	82
 
 ;------------------------------------------------------------------------------
 ; header: entry points and data offsets for the loaders
@@ -216,16 +217,21 @@ z_0116:
 
 ;------------------------------------------------------------------------------
 ; computed jumps: jp (hl) / (ix) / (iy)
+; (a0 = bank << 16 | address of the jp, kept for the red screen; the flags
+; are left as they were, as on the Z80)
 z80_jp_hl:
+	move.w	ccr,-(sp)
 	move.w	d3,d7
 	bra.s	z80_jp
 z80_jp_ix:
+	move.w	ccr,-(sp)
 	move.w	d4,d7
 	bra.s	z80_jp
 z80_jp_iy:
+	move.w	ccr,-(sp)
 	move.w	d5,d7
 z80_jp:
-	move.w	ccr,-(sp)
+	move.l	a0,RT_JPFROM(a4)
 	bsr.s	z80_lookup
 	move.w	(sp)+,ccr
 	jmp	(a0)

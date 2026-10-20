@@ -67,13 +67,14 @@ or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
 (sprites currently always appear on top).
 
 Test mode: the **Help** key switches it on and off (the power LED dims while
-it is on). The player's vitality, lives and time then never go down - handy
+it is on). Hits then do no damage, and lives and time never go down - handy
 for exploring. (Falling into a pit still costs the life you're on, so you
 restart at the last checkpoint, but the game doesn't end.)
 
 If the screen turns red with "UNKNOWN Z80 CODE / BANK xx AT xxxx", the game
 reached Z80 code the translator hasn't seen yet: please report those numbers
-and where it happened.
+(and the "FROM xx xxxx" line under them, where the jump came from) and where
+it happened.
 
 ## Running in WinUAE
 

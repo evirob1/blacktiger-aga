@@ -117,7 +117,7 @@ REC_SHIFT	equ	6			; w  shift << 12
 REC_MASK	equ	8			; l  mask (16 words)
 REC_DATA	equ	12			; l  planes 0-3 (16 words each)
 REC_SLOT	equ	16			; w  colour slot
-SAVESIZE	equ	24*1024			; background saved under the sprites, per buffer
+SAVESIZE	equ	27*1024			; background saved under the sprites, per buffer
 SAVE_ROW	equ	NPLANES*4		; ... per line of a sprite
 NBUF		equ	3			; display buffers: shown, queued, being drawn
 MAXBOB		equ	64			; sprites drawn per frame at most
@@ -165,10 +165,12 @@ pv_full		rs.b	1			; scan in progress looks at every cell
 		rs.b	1
 pv_srow		rs.w	1			; map row being scanned (wrapped)
 pv_saverows	rs.w	1			; sprite lines planned this frame
+pv_bobcut	rs.w	1			; first sprite number left out (bob_cutoff)
+pv_palcnt	rs.b	32			; draw_row: characters per text palette
 pv_cheat	rs.b	1			; test mode (Help key): no damage, lives, time
 pv_helpkey	rs.b	1			; Help key held last frame
-pv_cvit		rs.b	1			; test mode: vitality / lives kept at least at these
-pv_clives	rs.b	1
+pv_clives	rs.b	1			; test mode: lives kept at least at this
+		rs.b	1
 pv_ctime	rs.w	1			; time (minutes << 8 | seconds, BCD)
 pv_ctick	rs.w	1			; frames since the time last changed
 pv_usedacc	rs.l	1			; background palettes on screen
@@ -281,6 +283,13 @@ PLAT_DI	macro				; (68k) interrupts off
 	ori.w	#$0700,sr
 	endm
 
+PLAT_HIT macro				; test mode: a hit does no damage (c)
+	tst.b	(pvars+pv_cheat,pc)
+	beq.s	.nohit\@
+	clr.b	d1
+.nohit\@
+	endm
+
 PLAT_EI	macro				; enable + deliver a vblank that came while disabled
 	bsr	z80_ei
 	endm
@@ -375,6 +384,20 @@ z80_bad_jump:
 	move.w	d6,d0
 	moveq	#4-1,d1
 	bsr	.hex
+	lea	bad_from+5(pc),a0	; "FROM bb aaaa": the jp (hl) that went there
+	move.l	rt_vars+RT_JPFROM(pc),d6
+	move.l	d6,d0
+	swap	d0
+	moveq	#2-1,d1
+	ror.w	#8,d0
+	bsr	.hex
+	lea	bad_from+8(pc),a0
+	move.w	d6,d0
+	moveq	#4-1,d1
+	bsr	.hex
+	lea	bad_from(pc),a2
+	CHIPA	CA_SAVE0+40*160+6,a3
+	bsr	bad_text
 	lea	bad_title(pc),a2
 	CHIPA	CA_SAVE0+40*96+4,a3
 	bsr	bad_text
@@ -445,6 +468,7 @@ bad_text:
 
 bad_title:	dc.b	"UNKNOWN Z80 CODE",0
 bad_where:	dc.b	"BANK xx AT xxxx",0
+bad_from:	dc.b	"FROM xx xxxx",0
 	even
 
 plat_irq:				; (rt_core header; the Amiga uses lev3)
@@ -944,9 +968,10 @@ read_inputs:
 
 ;------------------------------------------------------------------------------
 ; Test mode, toggled with the Help key (the power LED dims while it is on):
-; the player's vitality, lives and time never go down. Black Tiger's RAM:
+; hits do no damage (PLAT_HIT, at the one place the game takes a hit off the
+; armour, $F3AD: holding that value up instead fought the game's own changes
+; to it), and lives and time never go down. Black Tiger's RAM:
 	Z80	ZF3A0,$f3a0		; lives
-	Z80	ZF3AD,$f3ad		; vitality (hits left)
 	Z80	ZF3B1,$f3b1		; time: seconds, BCD
 	Z80	ZF3B2,$f3b2		; minutes
 test_mode:
@@ -959,8 +984,7 @@ test_mode:
 	and.b	d1,d0
 	beq.s	.on
 	not.b	pv_cheat(a4)
-	move.b	(ZF3AD,a0),pv_cvit(a4)	; from the values now
-	move.b	(ZF3A0,a0),pv_clives(a4)
+	move.b	(ZF3A0,a0),pv_clives(a4)	; from the values now
 	move.b	(ZF3B2,a0),d0
 	lsl.w	#8,d0
 	move.b	(ZF3B1,a0),d0
@@ -971,13 +995,7 @@ test_mode:
 	bset	#1,CIAA_PRA		; LED dim: test mode
 .on	tst.b	pv_cheat(a4)
 	beq.s	.x
-	move.b	(ZF3AD,a0),d0		; vitality: back up to the highest seen
-	cmp.b	pv_cvit(a4),d0
-	bhs.s	.v
-	move.b	pv_cvit(a4),(ZF3AD,a0)
-	bra.s	.l
-.v	move.b	d0,pv_cvit(a4)
-.l	move.b	(ZF3A0,a0),d0		; lives
+	move.b	(ZF3A0,a0),d0		; lives
 	cmp.b	pv_clives(a4),d0
 	bhs.s	.l2
 	move.b	pv_clives(a4),(ZF3A0,a0)
@@ -1043,9 +1061,9 @@ update_text:
 	bne.s	.row
 	rts
 
-; text row d5 from txshadow: per block of 8 characters, the first palette
-; goes to the even sprite, the next different one to the odd sprite (any
-; further palette is shown with the first)
+; text row d5 from txshadow: per block of 8 characters, the most used palette
+; goes to the even sprite, the next most used to the odd sprite (any further
+; palette is shown with the first)
 draw_row:
 	movem.l	d0-d7/a0-a3,-(sp)
 	addq.w	#1,pv_textver(a4)
@@ -1063,25 +1081,41 @@ draw_row:
 	lsl.w	#7,d0			; 8 lines x 16 bytes
 	add.w	d0,a2
 	moveq	#3,d7			; block
-.blk	moveq	#-1,d3			; palettes A, B
-	moveq	#-1,d4
+.blk	lea	pv_palcnt(a4),a0	; characters per palette in the block
+	moveq	#7,d6
+.cl	clr.l	(a0)+
+	dbf	d6,.cl
 	moveq	#7,d6
 .fp	bsr	cell_char
 	bmi.s	.fn			; (blank)
 	moveq	#$1f,d1
 	and.b	$400(a3),d1
-	tst.w	d3
-	bpl.s	.fa
-	move.w	d1,d3
-	bra.s	.fn
-.fa	cmp.w	d3,d1
-	beq.s	.fn
-	tst.w	d4
-	bpl.s	.fn
-	move.w	d1,d4
+	lea	pv_palcnt(a4),a0
+	addq.b	#1,(a0,d1.w)
 .fn	addq.l	#1,a3
 	dbf	d6,.fp
 	subq.l	#8,a3
+	moveq	#-1,d3			; palettes A, B: the two most used
+	moveq	#-1,d4
+	moveq	#0,d5			; their counts
+	moveq	#0,d2
+	lea	pv_palcnt(a4),a0
+	moveq	#31,d6
+.pk	moveq	#0,d1
+	move.b	(a0,d6.w),d1
+	beq.s	.pn
+	cmp.w	d5,d1
+	bls.s	.pb
+	move.w	d5,d2			; new first; the old one second
+	move.w	d3,d4
+	move.w	d1,d5
+	move.w	d6,d3
+	bra.s	.pn
+.pb	cmp.w	d2,d1
+	bls.s	.pn
+	move.w	d1,d2
+	move.w	d6,d4
+.pn	dbf	d6,.pk
 	move.b	d3,(a1)+		; ($ff: none)
 	move.b	d4,(a1)+
 	moveq	#7,d6
@@ -1843,12 +1877,15 @@ draw_bobs:
 	btst	#2,pv_iod+$c(a4)		; sprites off?
 	bne	.x
 	bsr	blit_wait		; (flipbuf is free again)
+	bsr	bob_cutoff
 	move.l	pv_rec(a4),a2
 	CHIPA	CA_FLIPBUF,a3
 	moveq	#0,d7			; objects
 	clr.w	pv_saverows(a4)
 	moveq	#NSPR-1,d6
-.spr	lea	pv_sprsnap(a4),a0
+.spr	cmp.w	pv_bobcut(a4),d6	; (no room for it: lower priority)
+	bhs	.next
+	lea	pv_sprsnap(a4),a0
 	lea	(a0,d6.w*4),a0
 	moveq	#0,d5
 	move.b	2(a0),d5		; y
@@ -2005,6 +2042,48 @@ get_flipped:
 	rts
 
 fliptag:	ds.l	64		; flip cache: sprite number, frame last used
+
+; With more sprites than room (MAXBOB, SAVESIZE), the ones with the lowest
+; priority (highest numbers) are left out: pv_bobcut = the first left out.
+bob_cutoff:
+	movem.l	d0-d4/a0-a1,-(sp)
+	lea	pv_sprsnap(a4),a0
+	lea	sprrows(pc),a1
+	moveq	#0,d3			; lines to save
+	moveq	#0,d4			; sprites
+	moveq	#0,d2			; sprite number
+.s	move.b	2(a0),d0		; y: on screen?
+	beq.s	.n
+	cmp.b	#240,d0
+	bhs.s	.n
+	moveq	#0,d0
+	move.b	1(a0),d0
+	moveq	#0,d1
+	move.b	3(a0),d1
+	btst	#4,d0
+	beq.s	.xp
+	sub.w	#256,d1
+.xp	cmp.w	#-15,d1
+	blt.s	.n
+	and.w	#$e0,d0
+	lsl.w	#3,d0
+	move.b	(a0),d0
+	moveq	#0,d1
+	move.b	1(a1,d0.w*2),d1		; its lines
+	beq.s	.n
+	add.w	d1,d3
+	addq.w	#1,d4
+	cmp.w	#SAVESIZE/SAVE_ROW,d3
+	bhi.s	.cut
+	cmp.w	#MAXBOB,d4
+	bhi.s	.cut
+.n	addq.l	#4,a0
+	addq.w	#1,d2
+	cmp.w	#NSPR,d2
+	bne.s	.s
+.cut	move.w	d2,pv_bobcut(a4)
+	movem.l	(sp)+,d0-d4/a0-a1
+	rts
 
 ; a1 = sprite (4 planes x 16 words), a0 = its mask -> x-flipped copies at a3
 ; (a1, a0 then point at them; a3 moves on)

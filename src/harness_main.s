@@ -27,6 +27,9 @@ PLAT_IDLE macro
 PLAT_DI	macro
 	endm
 
+PLAT_HIT macro
+	endm
+
 PLAT_EI	macro				; the harness raises interrupts itself
 	st	RT_IE(a4)
 	endm

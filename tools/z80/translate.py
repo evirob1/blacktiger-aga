@@ -33,6 +33,9 @@ COND_USE = {"nz": Z, "z": Z, "nc": C, "c": C, "po": V, "pe": V, "p": S, "m": S}
 # provided by the runtime.
 EXCLUDE = [(0x00B3, 0x00F6), (0x0116, 0x0135)]
 RUNTIME_LABELS = {0x00B3, 0x0116}
+# `ld c,(ix+15)`: the damage a hit does to the armour ($F3AD), just before
+# it is taken off; PLAT_HIT may change it (test mode: none)
+HIT_SITE = (None, 0x2F49)
 
 
 def excluded(key):
@@ -263,7 +266,9 @@ class Translator:
         if k == "reti":
             return T(["rts"], clob=0, end=True)
         if k == "jpind":
-            return T(["bra z80_jp_%s" % args[0][1:-1]], clob=0, end=True)
+            src = (0xFF if bank is None else bank) << 16 | ins.pc
+            return T(["movea.l #$%06x,a0" % src, "bra z80_jp_%s" % args[0][1:-1]],
+                     clob=0, end=True)
 
         # ---- 8-bit loads
         if op == "ld" and len(args) == 2:
@@ -496,6 +501,9 @@ class Translator:
                 if ins.text not in ("ldir", "lddr", "ldi", "ldd") and (
                         key in self.bank_sites or key in self.bg_stores or self.static_bank_read(key, ins)):
                     trs[key] = self.bank_aware(key, ins, trs[key])
+                if key == HIT_SITE:     # the damage of a hit, in c: the platform's test mode
+                    trs[key].lines.append("PLAT_HIT")
+                    trs[key].clob |= CCR_MOVE
         daa_keys = set(fused.values())
         for k in daa_keys:
             trs[k] = T(["; daa (fused with the add/sub above)"], clob=0)
