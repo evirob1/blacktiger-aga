@@ -100,7 +100,7 @@ COLBIAS		equ	16			; memory column = map column + 16
 	ifd	PAL
 DISP_Y0		equ	$3c			; 50 Hz: 313 lines
 	else
-DISP_Y0		equ	$1c			; 60 Hz (NTSC timing, as the arcade): 262 lines
+DISP_Y0		equ	$24			; 60 Hz (NTSC timing, as the arcade): 262 lines
 	endif
 COPSIZE		equ	8192
 PALSECT		equ	8*(1+32)*4		; palette section at the start of each copper list
