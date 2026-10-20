@@ -154,25 +154,15 @@ def build(rom, dynamic_path=None):
             cm.seeds.add((b, a))
             cm.entries.add((b, a))
             cm.add(b, a)
-    static_tables(cm)
-    data_pointers(cm)
-    # multi-way returns: code at return address + k is reachable too
+    # the static passes, until none of them finds anything new
     while True:
-        _, multiway, _ = stack_depths(cm)
-        new = []
-        for key, ins in list(cm.insns.items()):
-            if ins.kind == "call" and loc(cm.bank_ctx.get(key) if key[0] is None else key[0],
-                                           ins.target) in multiway:
-                tb = cm.bank_ctx.get(key) if key[0] is None else key[0]
-                for k in multiway[loc(tb, ins.target)]:
-                    r = loc(key[0], key[1] + ins.length + k)
-                    if r not in cm.insns:
-                        new.append(r)
-        if not new:
+        n = len(cm.insns)
+        static_tables(cm)
+        data_pointers(cm)
+        gap_routines(cm)
+        multiway_returns(cm)
+        if len(cm.insns) == n:
             break
-        for b, a in new:
-            cm.entries.add((b, a))
-            cm.add(b, a)
     return cm
 
 
@@ -301,6 +291,26 @@ def stack_depths(cm):
 DISPATCH = 0x0408   # add a,a / ld e,a / ld d,0 / add hl,de / ld e,(hl) / inc hl / ld d,(hl) / ex de,hl / jp (hl)
 
 
+def multiway_returns(cm):
+    """Multi-way returns: code at return address + k is reachable too."""
+    while True:
+        _, multiway, _ = stack_depths(cm)
+        new = []
+        for key, ins in list(cm.insns.items()):
+            if ins.kind == "call" and loc(cm.bank_ctx.get(key) if key[0] is None else key[0],
+                                           ins.target) in multiway:
+                tb = cm.bank_ctx.get(key) if key[0] is None else key[0]
+                for k in multiway[loc(tb, ins.target)]:
+                    r = loc(key[0], key[1] + ins.length + k)
+                    if r not in cm.insns:
+                        new.append(r)
+        if not new:
+            break
+        for b, a in new:
+            cm.entries.add((b, a))
+            cm.add(b, a)
+
+
 def static_tables(cm):
     """Jump tables found from the code: `ld hl,TABLE` followed within the same
     block by a jump/call to the dispatcher at $0408, or by the inline lookup
@@ -394,13 +404,95 @@ def data_pointers(cm):
                 if not lo <= w < hi:
                     continue
                 k = loc(bank, w)
-                if k in ends and k not in cm.insns and _looks_like_code(cm, bank, w, strict=True):
+                if (k in ends and k not in cm.insns and _looks_like_code(cm, bank, w, strict=True)
+                        and _closure_ok(cm, bank, w)):
                     found.add(k)
         if not found:
             return
         for k in sorted(found, key=lambda k: (k[0] if k[0] is not None else -1, k[1])):
             cm.entries.add(k)
             cm.add(*k)
+
+
+def gap_routines(cm):
+    """Routines laid out one after another but only reached through computed
+    addresses (e.g. object behaviours in a bank): right after a known
+    unconditional jp / jr / ret where nothing is known yet, take the bytes as
+    code if they read as a complete small routine - plausible instructions
+    (_looks_like_code strict) up to an unconditional ret or jp within 24
+    instructions, none of them already known, branches inside the ROM area.
+    Repeats while new code turns up."""
+    while True:
+        found = []
+        for (b, a), ins in list(cm.insns.items()):
+            if ins.cond is not None or ins.kind not in ("jp", "jr", "ret", "reti"):
+                continue
+            k = loc(b, a + ins.length)
+            if k in cm.insns or (k[0] is None and k[1] >= 0x8000) or k[1] >= 0xC000:
+                continue
+            if _small_routine(cm, k[0], k[1]) and _closure_ok(cm, k[0], k[1]):
+                found.append(k)
+        if not found:
+            return
+        for k in found:
+            cm.entries.add(k)
+            cm.add(*k)
+
+
+def _small_routine(cm, bank, addr):
+    if not _looks_like_code(cm, bank, addr, strict=True):
+        return False
+    sp = Space(cm.rom, bank)
+    hi = 0x8000 if bank is None else 0xC000
+    pc = addr
+    for _ in range(24):
+        if loc(bank, pc) in cm.insns or pc >= hi:
+            return False
+        ins = decode(sp, pc)
+        t = ins.text
+        if ("undefined" in t or "prefix" in t or t in ("nop", "halt", "rst $38")
+                or (t.startswith("ld ") and len(t) == 6 and t[3] == t[5])):
+            return False
+        if ins.kind in ("jp", "jr", "call") and ins.target is not None and not (
+                ins.target < 0x8000 or (bank is not None and ins.target < 0xC000)):
+            return False
+        if ins.cond is None and ins.kind in ("ret", "jp", "jr", "jpind", "reti"):
+            return True
+        pc += ins.length
+    return False
+
+
+def _closure_ok(cm, bank, addr, limit=400):
+    """Everything newly reachable from addr decodes cleanly and never jumps
+    into RAM: what a real routine looks like, and junk usually doesn't."""
+    sp = Space(cm.rom, bank)
+    hi = 0x8000 if bank is None else 0xC000
+    work, seen = [addr], set()
+    while work:
+        pc = work.pop()
+        while True:
+            k = loc(bank, pc)
+            if k in cm.insns or pc in seen:
+                break
+            if pc >= 0xC000 or (bank is None and pc >= 0x8000):
+                return False
+            seen.add(pc)
+            if len(seen) > limit:
+                return False
+            ins = decode(sp, pc)
+            if "undefined" in ins.text or "prefix" in ins.text or ins.kind == "halt":
+                return False
+            if ins.kind in ("jp", "jr", "call", "rst") and ins.target is not None:
+                if ins.target >= 0xC000 or (bank is None and ins.target >= 0x8000):
+                    return False
+                if not (ins.kind == "call" and ins.target == BANK_SETTER):
+                    work.append(ins.target)
+            if ins.cond is None and ins.kind in ("jp", "jr", "ret", "reti", "jpind"):
+                break
+            if ins.kind == "call" and ins.cond is None and (ins.target in NO_RETURN or ins.target == BANK_SETTER):
+                break
+            pc += ins.length
+    return True
 
 
 def _looks_like_code(cm, bank, addr, strict=False):

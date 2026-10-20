@@ -1,6 +1,6 @@
 """Render the arcade picture as MAME draws it (backdrop, background, sprites,
-text) from an amiga_sim memory dump: the Z80's video RAM, palette RAM and
-scroll registers, and the sprite list the Amiga display last drew. A
+text) from an amiga_sim memory dump: the Z80's video RAM and palette RAM,
+and the view position and sprite list the Amiga display last drew. A
 reference for tools/harness/render_frame.py; with a third argument, compares
 the two and writes a difference image.
 
@@ -52,8 +52,10 @@ def main():
     io = lambda p: pvb("pv_io", p)
     layout = io(0x0E) & 1
     mw, mh = (2048, 1024) if layout else (1024, 2048)
-    sx0 = (io(8) | io(9) << 8) & (mw - 1)
-    sy0 = ((io(10) | io(11) << 8) + 16) & (mh - 1)
+    # the view position the display last drew with (the scroll registers may
+    # have moved on since)
+    sx0 = pvw("pv_vx") & (mw - 1)
+    sy0 = pvw("pv_vy") & (mh - 1)
     img = Image.new("RGB", (W, H), rgb(1023))
     px = img.load()
     bgon, objon, chon = not io(0x0C) & 2, not io(0x0C) & 4, not io(4) & 0x80

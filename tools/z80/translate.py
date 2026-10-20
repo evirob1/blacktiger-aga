@@ -154,22 +154,14 @@ class Translator:
     def static_bank_read(self, key, ins):
         """Reads that may hit the banked window without being seen in MAME:
         any pointer read in code that itself lives in a bank (it mostly reads
-        its own bank's tables), and the pointer-table read ld e,(hl) / inc hl /
-        ld d,(hl) anywhere."""
+        its own bank's tables), and any read through HL, DE or BC in the fixed
+        ROM (IX / IY point at objects in RAM)."""
         t = ins.text
         reads = re.match(r"(ld [a-z]+,|add a,|adc a,|sub |sbc a,|and |xor |or |cp |bit \d,)"
                          r"\((hl|de|bc|ix[+-]\d+|iy[+-]\d+)\)$", t)
         if not reads:
             return False
-        if key[0] is not None:
-            return True
-        nxt = self.cm.insns.get(codemap.loc(key[0], key[1] + ins.length))
-        prv = self.cm.insns.get(codemap.loc(key[0], key[1] - 1))
-        if t == "ld e,(hl)" and nxt is not None and nxt.text == "inc hl":
-            return True
-        if t == "ld d,(hl)" and prv is not None and prv.text == "inc hl":
-            return True
-        return False
+        return key[0] is not None or reads.group(2) in ("hl", "de", "bc")
 
     def bank_aware(self, key, ins, t):
         """An instruction seen reading the bank window through a register:
