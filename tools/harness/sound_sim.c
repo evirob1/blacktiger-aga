@@ -25,7 +25,9 @@ void snd_hook(unsigned int pc)
         char *p = getenv("SND_TRACE");
         while (p && *p && ntr < 32) { tr[ntr++] = (unsigned int)strtoul(p, &p, 16); if (*p == ',') p++; }
     }
-    if (now >= 1307000)
+    static unsigned int tfrom = (unsigned int)-1;
+    if (tfrom == (unsigned int)-1) tfrom = getenv("SND_TFROM") ? (unsigned int)atol(getenv("SND_TFROM")) : 0;
+    if (now >= tfrom)
         for (unsigned int i = 0; i < ntr; i++)
             if (pc == tr[i] + BASE) printf("T %06x sp %06x time %u\n", tr[i], m68k_get_reg(NULL, M68K_REG_SP), now);
     if (watch_pc && pc == watch_pc + BASE) watch_sp = m68k_get_reg(NULL, M68K_REG_SP);
@@ -53,8 +55,11 @@ unsigned int m68k_read_pcrelative_16(unsigned int a) { return m68k_read_memory_1
 unsigned int m68k_read_pcrelative_32(unsigned int a) { return m68k_read_memory_32(a); }
 unsigned int m68k_read_disassembler_16(unsigned int a) { return m68k_read_memory_16(a); }
 unsigned int m68k_read_disassembler_32(unsigned int a) { return m68k_read_memory_32(a); }
+static unsigned int wr_lo, wr_hi;              /* SND_WATCHRANGE=lo,hi: report writes there */
 static void watch(unsigned int a, int n)
 {
+    if (wr_hi && a >= wr_lo + BASE && a < wr_hi + BASE)
+        printf("WRITE %06x by pc %06x (time %u)\n", a - BASE, cur_pc - BASE, now);
     if (watch_sp && a < watch_sp + 4 && a + n > watch_sp)
         printf("WATCH: return address at %06x written by pc %06x (time %u)\n", watch_sp, cur_pc - BASE, now);
 }
@@ -70,7 +75,16 @@ void m68k_write_memory_32(unsigned int a, unsigned int v)
 {
     a &= MEMSIZE - 1;
     if (a == 0xf00000) { printf("W %u %u %02x %02x\n", now, (v >> 16) & 1, (v >> 8) & 0xff, v & 0xff); return; }
-    if (a == 0xf00004) { now = v; return; }
+    if (a == 0xf00004) {
+        if (v < now && hist_hi) {                   /* time went back: something broke */
+            printf("TIME BACK %u -> %u\n", now, v);
+            for (unsigned int i = hist_n > 4096 ? hist_n - 4096 : 0; i < hist_n; i++)
+                printf("H %06x\n", hist[i & 4095] & 0xffffff);
+            exit(1);
+        }
+        now = v;
+        return;
+    }
     if (a == 0xf0000c) { if (getenv("SND_DEBUG")) printf("EV %06x at %u\n", v, now); return; }
     if (a == 0xf00008) {
         if ((v >> 16) == 0xfd) printf("BAD JUMP %06x\n", v);
@@ -88,14 +102,16 @@ int main(int argc, char **argv)
     if (!f) { perror(argv[1]); return 1; }
     fread(mem + BASE, 1, MEMSIZE - BASE, f);
     fclose(f);
-    mem[0] = 0; mem[1] = 0x0f; mem[2] = 0; mem[3] = 0;      /* SSP */
+    mem[0] = 0; mem[1] = 0xff; mem[2] = 0; mem[3] = 0;      /* SSP: at the top (long event lists) */
     mem[4] = 0; mem[5] = BASE >> 16; mem[6] = 0; mem[7] = 0;
+    if (getenv("SND_WATCHRANGE")) sscanf(getenv("SND_WATCHRANGE"), "%x,%x", &wr_lo, &wr_hi);
     if (getenv("SND_WATCH")) watch_pc = (unsigned int)strtoul(getenv("SND_WATCH"), NULL, 16);
     if (getenv("SND_HIST")) sscanf(getenv("SND_HIST"), "%x,%x", &hist_lo, &hist_hi);
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68020);
     m68k_pulse_reset();
-    long long budget = 1500000000LL;           /* (a stuck run: say where) */
+    /* SND_BUDGET=cycles: a stuck run says where it was */
+    long long budget = getenv("SND_BUDGET") ? atoll(getenv("SND_BUDGET")) : 1LL << 62;
     while (!done) {
         budget -= m68k_execute(100000);
         if (budget < 0) {

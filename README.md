@@ -19,7 +19,7 @@ set). Please don't distribute the built disk images.
 | Game sprites (player, enemies, shots) | done: blitter objects, double buffered; matches a MAME-style reference render |
 | Background priority (scenery in front of sprites) | next |
 | Code coverage of later levels | in progress: code the recordings never reached stops with a red screen |
-| Sound | planned |
+| Sound | first version: the arcade's sound program translated (its YM2203 register writes match MAME exactly), played through a software mixer of sampled FM instruments and SSG tones |
 | WHDLoad/HD install | planned |
 
 See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and the roadmap.
@@ -30,7 +30,11 @@ See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and th
 
 You need:
 
-* **Python 3**: the build uses only the standard library.
+* **Python 3**: the build uses only the standard library, except for sound.
+* For sound: **numpy** (`pip install numpy`), **gcc** and **git**. The build
+  makes the sound program's instrument samples by running it on a 68k emulator
+  (Musashi, fetched with git and compiled with gcc). Without them you get a
+  silent disk.
 * **vasm** (`vasmm68k_mot`): either on your PATH or set `VASM` to its full path.
   Windows binaries: http://sun.hasenbraten.de/vasm/ (Motorola syntax, m68k).
 
@@ -51,10 +55,16 @@ python tools/build_game.py       -> build/blacktiger.adf (60 Hz, like the arcade
 python tools/build_game.py --pal -> 50 Hz version
 ```
 
-Memory: a stock A1200 (2 MB chip RAM) is enough: the game takes about 1.85 MB.
-With fast RAM (about 1.2 MB free, e.g. any 4 MB expansion) the program and the
-arcade's memory go there and only the graphics stay in chip RAM, which makes
-the busy scenes noticeably smoother. The same disk does both, automatically.
+Memory: a stock A1200 (2 MB chip RAM) is enough: the game takes about 1.9 MB
+with sound (1.8 MB without: if there isn't room for sound, the game runs
+silent). With fast RAM (about 1.35 MB free, e.g. any 4 MB expansion) the
+program, the arcade's memory and the sound data go there and only the graphics
+and the sound output stay in chip RAM, which makes the busy scenes noticeably
+smoother. The same disk does both, automatically.
+
+Sound costs CPU time: on a stock A1200 about a quarter to a third of it, so
+the display drops frames more often than without (the game itself still runs
+at full speed); with fast RAM about a fifth.
 
 The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
 arcade's own frame rate: the game runs at the original speed. That needs a
@@ -63,8 +73,8 @@ handles it). The `--pal` disk stays at 50 Hz, so the game runs at 5/6 speed.
 
 Controls: joystick in port 2 (fire = attack, second button or Space = jump,
 or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
-**2** = 2 players. Not there yet: sound, and scenery drawn in front of sprites
-(sprites currently always appear on top).
+**2** = 2 players. Not there yet: scenery drawn in front of sprites (sprites
+currently always appear on top).
 
 Test mode: the **Help** key switches it on and off (the power LED dims while
 it is on). Hits then do no damage, and lives and time never go down - handy
@@ -86,7 +96,10 @@ it happened.
 ## Layout
 
 ```
-src/boot.s            bootblock: loads the program into chip RAM
+src/boot.s            bootblock: loads the program and the sound data
+src/sound.s           the arcade's sound CPU: its translated program's runtime, YM2203 registers
+src/sound_play.s      the sound player: YM2203 registers -> sampled voices, mixed for Paula
+tools/sound/          YM2203 FM model, the instrument bank and the player's model (needs numpy)
 src/viewer.s          AGA level viewer (display engine, milestone 1)
 tools/bt_rom.py       ROM set loading and graphics decoding (from MAME's driver)
 tools/bt_level.py     level maps, palette scripts, tile layouts

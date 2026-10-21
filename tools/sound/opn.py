@@ -15,6 +15,7 @@ A patch is the channel's registers: per operator (in register order: slots
 import math
 
 CLOCK = 3579545
+FREQ_SCALE = float(__import__("os").environ.get("BT_FSCALE", "1"))
 RATE = CLOCK / 72                 # FM sample rate (prescaler /6)
 EG_EVERY = 3                      # samples per envelope step
 
@@ -34,7 +35,7 @@ ALGORITHMS = [
 
 def freq(fnum, block):
     """Note frequency (Hz) of an F-number and block."""
-    return fnum * (2 ** (block - 1)) * CLOCK / (144 * 2 ** 20) * 2
+    return fnum * (2 ** (block - 1)) * CLOCK / (144 * 2 ** 20) * 2 * FREQ_SCALE
 
 
 def keycode(fnum, block):

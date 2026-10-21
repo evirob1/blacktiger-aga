@@ -14,6 +14,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import bt_rom  # noqa: E402
+import build  # noqa: E402  (vasm helper)
 
 UNITS = 3579545 / 72            # YM timer units per second
 B = os.path.join(ROOT, "build", "sound")
@@ -23,14 +24,44 @@ def run(cmd, **kw):
     subprocess.run(cmd, check=True, cwd=ROOT, **kw)
 
 
+def musashi():
+    """The Musashi 68k emulator's source (fetched with git, its opcode tables
+    generated with gcc, as tools/harness/build.sh does)."""
+    m = os.path.join(ROOT, "build", "musashi")
+    if not os.path.exists(os.path.join(m, "m68kcpu.c")):
+        run(["git", "clone", "-q", "--depth", "1", "https://github.com/kstenerud/Musashi.git", m])
+    if not os.path.exists(os.path.join(m, "m68kops.c")):
+        run(["gcc", "-O2", "-o", os.path.join(m, "m68kmake"), os.path.join(m, "m68kmake.c")])
+        subprocess.run([os.path.join(m, "m68kmake"), ".", "m68k_in.c"], check=True, cwd=m,
+                       stdout=subprocess.DEVNULL)
+    return m
+
+
+def simulate():
+    """Translate the sound program, build the test (build/sound/sound_events.s
+    written already) and run it: its output lines."""
+    os.makedirs(B, exist_ok=True)
+    rom = bt_rom.load_roms(os.path.join(ROOT, "roms", "blktiger.zip"))["audiocpu"]
+    open(os.path.join(B, "snd_rom.bin"), "wb").write(rom)
+    run([sys.executable, "tools/z80/translate.py", "roms/blktiger.zip", "data/sound_entries.txt",
+         os.path.join(B, "sound_code.s"), os.path.join(B, "report.txt"), "--sound"])
+    run([build.vasm(), "-quiet", "-Fbin", "-m68020", "-Isrc", "-I" + B, "-o",
+         os.path.join(B, "sound_test.bin"), "src/sound_test.s"])
+    m = musashi()
+    run(["gcc", "-O2", "-w", "-I" + m, "-o", os.path.join(B, "sound_sim"), "tools/harness/sound_sim.c",
+         m + "/m68kcpu.c", m + "/m68kops.c", m + "/m68kdasm.c", m + "/softfloat/softfloat.c", "-lm"])
+    return subprocess.run([os.path.join(B, "sound_sim"), os.path.join(B, "sound_test.bin")],
+                          capture_output=True, text=True).stdout.splitlines()
+
+
 def main():
     log = sys.argv[1]
     os.makedirs(B, exist_ok=True)
     # events: latch writes, resets, and the timer interrupts as MAME ran them
     # (each interrupt's first write: reg $24 = timer A's, $26 = timer B's; the
     # first of each after a reset is the start-up's own)
-    # (the interrupt reads the latch after acknowledging its timer: its time
-    # here is that of the acknowledge, register $27)
+    # (the interrupt reads the latch about 25 us after acknowledging its
+    # timer, register $27: its time here is just before that)
     mame, events, first, pending = [], [], {"24": True, "26": True}, None
     for line in open(log):
         f = line.split()
@@ -42,7 +73,7 @@ def main():
                 else:
                     pending = 0x200 if f[3] == "24" else 0x201
             elif f[2] == "0" and f[3] == "27" and pending is not None:
-                events.append((float(f[5]) + 1e-7, pending))
+                events.append((float(f[5]) + 20e-6, pending))   # (~ when it reads the latch)
                 pending = None
         elif f[0] == "L":
             events.append((float(f[3]), int(f[2], 16)))
@@ -52,21 +83,11 @@ def main():
                 first = {"24": True, "26": True}
     events.sort()
     with open(os.path.join(B, "sound_events.s"), "w") as o:
-        o.write("snd_events:\n")
+        o.write("snd_events:\n\tdc.l\t0\n")
         for t, v in events:
             o.write("\tdc.l\t%d,$%02x\n" % (round(t * UNITS), v))
         o.write("\tdc.l\t-1\n")
-    rom = bt_rom.load_roms(os.path.join(ROOT, "roms", "blktiger.zip"))["audiocpu"]
-    open(os.path.join(B, "snd_rom.bin"), "wb").write(rom)
-    run(["python3", "tools/z80/translate.py", "roms/blktiger.zip", "data/sound_entries.txt",
-         os.path.join(B, "sound_code.s"), os.path.join(B, "report.txt"), "--sound"])
-    run(["vasmm68k_mot", "-quiet", "-Fbin", "-m68020", "-Isrc", "-I" + B, "-o",
-         os.path.join(B, "sound_test.bin"), "src/sound_test.s"])
-    m = os.path.join(ROOT, "build", "musashi")
-    run(["gcc", "-O2", "-w", "-I" + m, "-o", os.path.join(B, "sound_sim"), "tools/harness/sound_sim.c",
-         m + "/m68kcpu.c", m + "/m68kops.c", m + "/m68kdasm.c", m + "/softfloat/softfloat.c", "-lm"])
-    out = subprocess.run([os.path.join(B, "sound_sim"), os.path.join(B, "sound_test.bin")],
-                         capture_output=True, text=True, check=True).stdout.splitlines()
+    out = simulate()
     ours = []
     for line in out:
         f = line.split()

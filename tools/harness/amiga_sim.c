@@ -28,6 +28,15 @@ static unsigned long long FRAME = 283750;  /* PAL; NTSC timing (BEAMCON0 = 0): 2
 static unsigned char mem[MEMSIZE];
 static unsigned int z80mem_off, vars_off;
 static int irq_pending;
+/* Paula: the four channels' DMA (block timing only) and channel 0's block
+   interrupt (level 4); BT_WAV=file records what they play (0+3 left, 1+2 right) */
+static int aud_pending;
+static unsigned int aud_lc[4], aud_len[4], aud_per[4], aud_vol[4], dmacon, intena;
+static unsigned long long aud_next;
+static int aud_on;
+static FILE *wav;
+static unsigned int wav_frames;
+static void set_ipl(void) { m68k_set_irq(aud_pending ? 4 : irq_pending ? 3 : 0); }
 static unsigned long long now;            /* 68k cycles */
 static unsigned long long in_lev3, lev3_start;
 static int in_irq;
@@ -68,7 +77,7 @@ static unsigned int custom_read(unsigned int reg)
     case 0x006: return (unsigned int)(now / 64) & 0xffff;   /* VHPOSR moves */
     case 0x00c: return joy1dat;                    /* JOY1DAT (BT_RANDJOY) */
     case 0x016: return 0xffff;                     /* POTINP: buttons up */
-    case 0x01e: return irq_pending ? 0x0020 : 0;   /* INTREQR */
+    case 0x01e: return (irq_pending ? 0x0020 : 0) | (aud_pending ? 0x0080 : 0);   /* INTREQR */
     default: return 0;
     }
 }
@@ -185,9 +194,22 @@ static void custom_write(unsigned int reg, unsigned int v)
     blt[(reg & 0x1fe) / 2] = v;
     if ((reg & 0x1fe) == 0x1dc && !(v & 0x20)) FRAME = 262ULL * 227 * 4;
     if ((reg & 0x1fe) == 0x058) blit();
+    if ((reg & 0x1fe) >= 0x0a0 && (reg & 0x1fe) < 0x0e0) {
+        int c = ((reg & 0x1fe) - 0x0a0) >> 4, r = (reg & 0x0f);
+        if (r == 0) aud_lc[c] = (aud_lc[c] & 0xffff) | (v << 16);
+        if (r == 2) aud_lc[c] = (aud_lc[c] & 0xffff0000u) | v;
+        if (r == 4) aud_len[c] = v;
+        if (r == 6) aud_per[c] = v;
+        if (r == 8) aud_vol[c] = v;
+    }
+    if ((reg & 0x1fe) == 0x096) dmacon = v & 0x8000 ? dmacon | (v & 0x7fff) : dmacon & ~v;
+    if ((reg & 0x1fe) == 0x09a) intena = v & 0x8000 ? intena | (v & 0x7fff) : intena & ~v;
+    if ((reg & 0x1fe) == 0x09c && !(v & 0x8000) && (v & 0x80)) { aud_pending = 0; set_ipl(); }
+    if (!aud_on && (dmacon & 0x201) == 0x201) { aud_on = 1; aud_next = T(); }
+    if (aud_on && (dmacon & 0x201) != 0x201) aud_on = 0;
     if ((reg & 0x1fe) == 0x09c && !(v & 0x8000) && (v & 0x20)) {  /* INTREQ clear VERTB */
         irq_pending = 0;
-        m68k_set_irq(0);
+        set_ipl();
     }
     if ((reg & 0x1fe) == 0x180 && v == 0x0b00) {      /* z80_bad_jump's red screen */
         unsigned int d7 = m68k_get_reg(NULL, M68K_REG_D7);
@@ -244,8 +266,65 @@ static int in_rt;
 
 static int z80(unsigned int addr);
 static int sim_frame;
+/* BT_PCHIST=file: the time spent at each instruction of the program (the
+   first 1 MB), written at the end as "offset cycles" lines */
+static unsigned long long *pchist;
+static unsigned int hist_pc, hist_base;
+static unsigned long long hist_t;
+/* BT_ADF=file: boot the disk's bootblock instead of loading game.bin, with
+   the Exec calls it makes done here: AllocMem (fast RAM at $800000 with
+   BT_FASTMODE, else none; chip RAM at the program's base, or the chip block
+   with fast RAM; at most BT_CHIPMAX bytes), FreeMem, DoIO, CacheClearU */
+#define BOOTAT 0x00f00000
+#define IOREQ  0x00f01000
+static unsigned char *adf;
+static void adf_call(unsigned int pc)
+{
+    unsigned int d0 = m68k_get_reg(NULL, M68K_REG_D0), d1 = m68k_get_reg(NULL, M68K_REG_D1);
+    unsigned int a1 = m68k_get_reg(NULL, M68K_REG_A1), r = 0;
+    if (pc == EXEC - 198) {
+        unsigned int max = getenv("BT_CHIPMAX") ? (unsigned int)strtoul(getenv("BT_CHIPMAX"), NULL, 0) : 0x1f0000;
+        if (d1 & 4) r = getenv("BT_FASTMODE") ? 0x800000 : 0;
+        else if (d1 & 2) r = d0 <= max ? (getenv("BT_FASTMODE") ? CHIPBLOCK : BASE) : 0;
+        if (r) memset(mem + r, 0, d0);
+        printf("boot: AllocMem(%u, $%x) = $%x\n", d0, d1, r);
+        m68k_set_reg(M68K_REG_D0, r);
+    } else if (pc == EXEC - 456) {
+        unsigned int cmd = mem[a1 + 28] << 8 | mem[a1 + 29];
+        unsigned int len = m68k_read_memory_32(a1 + 36), data = m68k_read_memory_32(a1 + 40);
+        unsigned int off = m68k_read_memory_32(a1 + 44);
+        if (cmd == 2) {
+            memcpy(mem + data, adf + off, len);
+            printf("boot: read %u bytes from %u to $%x\n", len, off, data);
+        }
+        mem[a1 + 31] = 0;
+        m68k_set_reg(M68K_REG_D0, 0);
+    }
+}
+
+/* the program's runtime header (from the listing: BT_RT_HEADER) */
+static void read_header(void)
+{
+    unsigned int hdr = BASE + (unsigned int)strtoul(getenv("BT_RT_HEADER") ? getenv("BT_RT_HEADER") : "0", NULL, 16);
+    z80mem_off = hdr - BASE + rd32(hdr + 8);
+    vars_off = hdr - BASE + rd32(hdr + 16);
+    idle_lo = hdr + rd32(hdr + 24);
+    idle_hi = hdr + rd32(hdr + 28);
+}
+
 void harness_hook(unsigned int pc)
 {
+    if (adf && (pc == EXEC - 198 || pc == EXEC - 456)) adf_call(pc);
+    if (adf && getenv("BT_BOOTTRACE") && pc >= BOOTAT && pc < BOOTAT + 0x128) printf("boot pc %x\n", pc - BOOTAT);
+    if (pc == BASE && adf) read_header();
+    if (pc == BASE && adf && !getenv("BT_QUIET_BOOT"))
+        printf("boot: the program starts, A2 = $%x, A3 = $%x\n", m68k_get_reg(NULL, M68K_REG_A2), m68k_get_reg(NULL, M68K_REG_A3));
+    if (pchist) {
+        unsigned long long t = T();
+        unsigned int o = hist_pc - hist_base;
+        if (o < 0x100000) pchist[o] += t - hist_t;
+        hist_pc = pc; hist_t = t;
+    }
     {
         unsigned long long t = T();
         if (idle_lo && pc >= idle_lo && pc < idle_hi && !(indisp_addr && mem[indisp_addr])) idle_cycles += t - idle_last;
@@ -258,11 +337,28 @@ void harness_hook(unsigned int pc)
         if (mem[indisp_addr]) { disp_cycles += t - hook_last; disp_clock += t - hook_last; }
         hook_last = t;
     }
+    /* audio: a block starts (latching AUDxLC / LEN): record it, interrupt */
+    if (aud_on && T() >= aud_next) {
+        unsigned int n = aud_len[0] * 2;
+        if (wav && n) {
+            for (unsigned int i = 0; i < n; i++) {
+                int l = (signed char)mem[(aud_lc[0] + i) & 0xffffff] * (int)aud_vol[0] +
+                        (signed char)mem[(aud_lc[3] + i) & 0xffffff] * (int)aud_vol[3];
+                int r = (signed char)mem[(aud_lc[1] + i) & 0xffffff] * (int)aud_vol[1] +
+                        (signed char)mem[(aud_lc[2] + i) & 0xffffff] * (int)aud_vol[2];
+                short o[2] = { (short)(l * 2), (short)(r * 2) };
+                fwrite(o, 2, 2, wav);
+            }
+            wav_frames += n;
+        }
+        aud_next += (unsigned long long)(n ? n : 2) * (aud_per[0] ? aud_per[0] : 256) * 4;
+        if (intena & 0x80) { aud_pending = 1; set_ipl(); m68k_end_timeslice(); }
+    }
     /* the vertical blank arrives at its exact cycle, between any two instructions */
     if (!vbl_due && T() >= next_vbl) {
         vbl_due = 1;
         irq_pending = 1;
-        m68k_set_irq(3);
+        set_ipl();
         m68k_end_timeslice();
     }
     for (int i = 0; i < nprobes; i++)
@@ -356,8 +452,32 @@ int main(int argc, char **argv)
        base comes from BT_BASE) instead of booting game.bin */
     const char *resume = getenv("BT_RESUME");
     if (resume) BASE = (unsigned int)strtoul(getenv("BT_BASE"), NULL, 16);
+    else if (getenv("BT_ADF")) {
+        FILE *af = fopen(getenv("BT_ADF"), "rb");
+        if (!af) { perror(getenv("BT_ADF")); return 1; }
+        adf = malloc(901120);
+        if (fread(adf, 1, 901120, af) != 901120) { fprintf(stderr, "short ADF\n"); return 1; }
+        fclose(af);
+        memcpy(mem + BOOTAT, adf, 1024);
+        static const int calls[] = {198, 210, 456, 636};
+        for (int i = 0; i < 4; i++) { mem[EXEC - calls[i]] = 0x4e; mem[EXEC - calls[i] + 1] = 0x75; }
+    }
     else fread(mem + BASE, 1, 0x400000, f);
     fclose(f);
+    /* the sound data, where the bootblock puts it (BT_SOUND=file,offset from
+       the program in one block,offset in the fast block); its address in A2 */
+    unsigned int snd_at = 0;
+    if (!resume && !adf && getenv("BT_SOUND") && !getenv("BT_NOSOUND")) {
+        char name[512];
+        unsigned int at_stock, at_fast;
+        if (sscanf(getenv("BT_SOUND"), "%511[^,],%x,%x", name, &at_stock, &at_fast) == 3) {
+            FILE *sf = fopen(name, "rb");
+            if (!sf) { perror(name); return 1; }
+            snd_at = BASE + (BASE > 0x10000 ? at_fast : at_stock);
+            fread(mem + snd_at, 1, 0x100000, sf);
+            fclose(sf);
+        }
+    }
     int seconds = atoi(argv[2]);
     /* the platform code starts with lea super(pc),a5 / jsr -30(a6): fake Supervisor */
     mem[EXEC - 30] = 0x4e; mem[EXEC - 29] = 0xd5;   /* jmp (a5) */
@@ -372,6 +492,7 @@ int main(int argc, char **argv)
             if (*p == ',') p++;
         }
     }
+    if (getenv("BT_PCHIST")) { pchist = calloc(0x100000, sizeof *pchist); hist_base = BASE; }
     if (getenv("BT_BLIT_CYC")) BLIT_CYC = atoi(getenv("BT_BLIT_CYC"));
     if (getenv("BT_CHIPWAIT")) chipwait = atoi(getenv("BT_CHIPWAIT"));
     if (getenv("BT_ROUTINE")) {
@@ -381,12 +502,25 @@ int main(int argc, char **argv)
     }
     if (getenv("BT_FASTRAM")) fast_from = (unsigned int)strtoul(getenv("BT_FASTRAM"), NULL, 16);
     if (getenv("BT_INDISP")) indisp_addr = BASE + (unsigned int)strtoul(getenv("BT_INDISP"), NULL, 16);
+    if (getenv("BT_WAV")) {
+        wav = fopen(getenv("BT_WAV"), "wb");
+        static const unsigned char hdr[44] = {0};
+        fwrite(hdr, 1, 44, wav);                    /* (filled in at the end) */
+    }
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68020);
     m68k_pulse_reset();
     m68k_set_reg(M68K_REG_A6, EXEC);
     m68k_set_reg(M68K_REG_A3, BASE > 0x10000 ? CHIPBLOCK : 0);
     m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
+    m68k_set_reg(M68K_REG_A2, snd_at);           /* (0: no room for sound) */
+    if (adf) {                                   /* (as Exec runs a bootblock) */
+        m68k_set_reg(M68K_REG_A1, IOREQ);
+        m68k_set_reg(M68K_REG_A3, 0);
+        m68k_set_reg(M68K_REG_SP, BOOTAT);
+        m68k_set_reg(M68K_REG_PC, BOOTAT + 12);
+        m68k_set_reg(M68K_REG_SR, 0x2700);       /* (Exec's interrupts: not here) */
+    }
     if (resume) {
         char fn[512];
         snprintf(fn, sizeof fn, "%s_chip.bin", resume);
@@ -414,11 +548,7 @@ int main(int argc, char **argv)
         FRAME = 262ULL * 227 * 4;               /* the game's default, NTSC */
         next_vbl = FRAME;
     }
-    unsigned int hdr = BASE + (unsigned int)strtoul(getenv("BT_RT_HEADER") ? getenv("BT_RT_HEADER") : "0", NULL, 16);
-    z80mem_off = hdr - BASE + rd32(hdr + 8);
-    vars_off = hdr - BASE + rd32(hdr + 16);
-    idle_lo = hdr + rd32(hdr + 24);
-    idle_hi = hdr + rd32(hdr + 28);
+    read_header();
 
     unsigned long long next = FRAME;
     int frame = 0, dumpi = 3;
@@ -495,6 +625,23 @@ int main(int argc, char **argv)
                 }
             }
         }
+    }
+    if (wav) {                                      /* the WAV header: 16-bit stereo */
+        unsigned int rate = 3546895 / (aud_per[0] ? aud_per[0] : 256), bytes = wav_frames * 4;
+        unsigned char h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,
+                               0,0,0,0,0,0,0,0,4,0,16,0,'d','a','t','a',0,0,0,0};
+        unsigned int v[4] = {36 + bytes, rate, rate * 4, bytes};
+        int at[4] = {4, 24, 28, 40};
+        for (int k = 0; k < 4; k++) for (int b = 0; b < 4; b++) h[at[k] + b] = v[k] >> (8 * b);
+        fseek(wav, 0, SEEK_SET);
+        fwrite(h, 1, 44, wav);
+        fclose(wav);
+    }
+    if (pchist) {
+        FILE *hf = fopen(getenv("BT_PCHIST"), "w");
+        for (unsigned int o = 0; o < 0x100000; o++)
+            if (pchist[o]) fprintf(hf, "%x %llu\n", o, pchist[o]);
+        fclose(hf);
     }
     for (int i = 0; i + 1 < nprobes; i++)
         if (probe_n[i]) printf("probe %d -> %d: %llu cycles on average\n", i, i + 1, probe_sum[i] / probe_n[i]);

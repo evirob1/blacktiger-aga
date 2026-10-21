@@ -148,7 +148,7 @@ SOUND_CODE_END = 0x0DC1    # the command table: data from here on
 
 def rst_tables(cm):
     """Sound CPU: the words after each rst $30 are a jump table (entry A),
-    up to where the first of its targets begins."""
+    up to where the first of its targets begins (0: an unused entry)."""
     rom = cm.rom
     for (b, a), ins in list(cm.insns.items()):
         if ins.kind != "rst" or ins.target != SOUND_RST_TABLE:
@@ -157,6 +157,9 @@ def rst_tables(cm):
         targets = cm.rst_targets.setdefault((b, a), [])
         while p + 2 <= end:
             w = rom[p] | rom[p + 1] << 8
+            if w == 0:                  # (an unused entry: $07C7's has two)
+                p += 2
+                continue
             if not 0x0100 <= w < SOUND_CODE_END:
                 break
             end = min(end, w)

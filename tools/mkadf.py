@@ -2,6 +2,7 @@
 (the bootblock unpacks it).
 
 usage: python3 tools/mkadf.py boot.bin payload.bin BSS_BYTES out.adf [CHIPA CHIPB]
+(tools/build_game.py also passes the sound data)
 """
 import hashlib
 import os
@@ -47,24 +48,39 @@ def pack_cached(data, cache):
     return packed
 
 
-def build(boot_path, payload_path, bss, out, chipa=0, chipb=0):
+def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, sound_size=0,
+          bss_end=0):
+    """sound_path: the sound data (the sound program's ROM + the instrument
+    bank), after the payload on the disk; the bootblock puts it at the end of
+    the program's block, sound_size bytes there (its window, the ROM, the
+    bank), in fast RAM when there is some (bss_end: where chip area B starts
+    in the one-block layout)."""
     boot = bytearray(open(boot_path, "rb").read())
     payload = open(payload_path, "rb").read()
     packed = pack_cached(payload, payload_path + ".lz")
+    sound = pack_cached(open(sound_path, "rb").read(), sound_path + ".lz") if sound_path else b""
+    if not sound_path:
+        sound_size = 0
     load = (len(payload) + 511) & ~511          # unpacked, as laid out in memory
     disk = (len(packed) + 511) & ~511
-    if 1024 + disk > ADF_SIZE:
-        raise SystemExit("payload too big for ADF: %d bytes packed" % len(packed))
+    sdisk = (len(sound) + 511) & ~511
+    if 1024 + disk + sdisk > ADF_SIZE:
+        raise SystemExit("too big for an ADF: %d bytes packed" % (disk + sdisk))
     # unpacked in place: the packed data sits at the top of the block, and the
     # output, growing from the bottom, must never reach the data still unread
     if load + bss - disk < lead(packed) + 16:
         raise SystemExit("the packed payload would overwrite itself while unpacking")
-    # the last four longs of the bootblock code: load_size (packed, on disk),
-    # fast_size (payload + BSS), chip_size (chip areas A + B), stock_size
-    # (payload + BSS + area B)
     chipa = (chipa + 7) & ~7
-    boot[len(boot) - 16:len(boot)] = struct.pack(">IIII", disk, load + bss, chipa + chipb,
-                                                 load + bss + chipb)
+    fast_at = (load + bss + 7) & ~7             # the sound data's place
+    quiet = (max(load + bss, bss_end + chipb) + 7) & ~7
+    fast, chip, stock = fast_at + sound_size, chipa + chipb, quiet + sound_size
+    if sound_path and fast_at - sdisk < load:
+        raise SystemExit("no room below the sound data for it packed")
+    if sound_path:                              # (for tools/harness/sim_env.sh)
+        open(sound_path + ".at", "w").write("%x %x\n" % (quiet + 0x4000, fast_at + 0x4000))
+    # the bootblock's last eight longs (src/boot.s)
+    boot[len(boot) - 32:len(boot)] = struct.pack(">IIIIIIII", disk, sdisk, fast, chip, stock, quiet,
+                                                 fast_at + 0x4000, quiet + 0x4000)
     block = bytearray(1024)
     block[:len(boot)] = boot
     block[4:8] = b"\0\0\0\0"
@@ -72,14 +88,18 @@ def build(boot_path, payload_path, bss, out, chipa=0, chipb=0):
     adf = bytearray(ADF_SIZE)
     adf[:1024] = block
     adf[1024:1024 + len(packed)] = packed
+    adf[1024 + disk:1024 + disk + len(sound)] = sound
     open(out, "wb").write(adf)
-    print("%s: payload %d bytes (%d packed), bss %d, %d%% of disk used" %
-          (out, len(payload), len(packed), bss, (1024 + disk) * 100 // ADF_SIZE))
-    if chipb:
-        print("  memory: %d KB of chip RAM, or %d KB fast + %d KB chip" %
-              ((load + bss + chipb) // 1024, (load + bss) // 1024, (chipa + chipb) // 1024))
+    print("%s: payload %d bytes (%d packed), sound %d packed, bss %d, %d%% of disk used" %
+          (out, len(payload), len(packed), len(sound), bss, (1024 + disk + sdisk) * 100 // ADF_SIZE))
+    if chipb and sound_path:
+        print("  memory: %d KB of chip RAM (%d KB without sound), or %d KB fast + %d KB chip" %
+              (stock // 1024, quiet // 1024, fast // 1024, chip // 1024))
+    elif chipb:
+        print("  memory: %d KB of chip RAM, or %d KB fast + %d KB chip (no sound)" %
+              (stock // 1024, fast // 1024, chip // 1024))
 
 
 if __name__ == "__main__":
     build(sys.argv[1], sys.argv[2], int(sys.argv[3], 0), sys.argv[4],
-          *(int(a, 0) for a in sys.argv[5:7]))
+          *(int(a, 0) for a in sys.argv[5:7]))   # (no sound data)

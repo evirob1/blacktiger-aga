@@ -11,10 +11,11 @@
 ;   snd_reset   d0.b = the game's port 4: bit 5 holds the sound CPU in reset
 ;               (the chips' timers keep running); its release starts it again
 ;
-; Both keep all registers. The includer defines SNDLOG (macro: a YM write,
-; d6 = chip, d0.b = register, d7.b = value; nothing in the game), snd_rom
-; (the 32K sound program), snd_mem (64K: the sound CPU's memory, halves
-; swapped as for the game: (a6,Rn.w) with a6 = snd_mem + $8000), ym_regs
+; Both keep all registers. The includer sets snd_a6 (the sound CPU's memory,
+; halves swapped as for the game: (a6,Rn.w) with a6 = its address $8000, so
+; its ROM is at a6; snd_init copies it there from snd_rom unless
+; SND_ROM_IN_PLACE) and defines SNDLOG (macro: a YM write, d6 = chip, d0.b =
+; register, d7.b = value; nothing in the game), ym_regs
 ; (2 x 256 bytes), ym_keyon (6 bytes), snd_rt (RT_SIZE) and z80_bad_jump.
 ;
 ; The sound CPU's main loop is ei / jr $0009 after the start-up; everything
@@ -26,13 +27,15 @@
 
 snd_init:
 	movem.l	d0-d7/a0-a6,-(sp)
+	ifnd	SND_ROM_IN_PLACE
 	lea	snd_rom(pc),a0		; the program: $0000-$7FFF
-	lea	snd_mem+$8000(pc),a1
+	move.l	snd_a6(pc),a1
 	move.w	#$8000/4-1,d7
 .c	move.l	(a0)+,(a1)+
 	dbf	d7,.c
+	endif
 	lea	snd_rt(pc),a4
-	lea	snd_mem+$8000(pc),a6
+	move.l	snd_a6(pc),a6
 	lea	snd_sp(pc),a0
 	move.l	sp,(a0)
 	bra	s_0000			; (its idle loop at $0009 comes back here)
@@ -46,7 +49,7 @@ snd_timer:
 	lea	snd_sp(pc),a0		; (a reset ends in the idle loop: back to here)
 	move.l	sp,(a0)
 	lea	snd_rt(pc),a4
-	lea	snd_mem+$8000(pc),a6
+	move.l	snd_a6(pc),a6
 	lea	ym_regs(pc),a0
 	lea	snd_tvars(pc),a1
 	move.b	snd_latch(pc),(SZC800,a6)
@@ -114,12 +117,12 @@ period_b:
 ; chip is not needed) and $0162 (chip IY); A = register, D = value. Keep
 ; every register and the flags.
 s_0153:	move.w	ccr,-(sp)
-	movem.l	d0-d7/a0-a1,-(sp)
+	movem.l	d6-d7/a0,-(sp)
 	moveq	#2,d6
 	and.w	d1,d6
 	bra.s	ym_write
 s_0162:	move.w	ccr,-(sp)
-	movem.l	d0-d7/a0-a1,-(sp)
+	movem.l	d6-d7/a0,-(sp)
 	moveq	#2,d6
 	and.w	d5,d6
 ym_write:
@@ -127,6 +130,18 @@ ym_write:
 	move.w	d2,d7
 	lsr.w	#8,d7			; value
 	SNDLOG
+	cmp.b	#$27,d0			; (timers, key on / off: more to do)
+	beq.s	.more
+	cmp.b	#$28,d0
+	beq.s	.more
+	lsl.w	#8,d6
+	move.b	d0,d6
+	lea	ym_regs(pc),a0
+	move.b	d7,(a0,d6.w)
+	movem.l	(sp)+,d6-d7/a0
+	move.w	(sp)+,ccr
+	rts
+.more	movem.l	d0-d5/a1,-(sp)
 	lea	ym_regs(pc),a0
 	move.w	d6,d1
 	lsl.w	#8,d1
@@ -178,7 +193,8 @@ ym_write:
 	move.b	d7,(a0,d1.w)
 	bra.s	.x
 .off	and.b	#$80,(a0,d1.w)
-.x	movem.l	(sp)+,d0-d7/a0-a1
+.x	movem.l	(sp)+,d0-d5/a1
+	movem.l	(sp)+,d6-d7/a0
 	move.w	(sp)+,ccr
 	rts
 
@@ -246,6 +262,7 @@ ST_SIZE		rs.b	0
 	cnop	0,4
 snd_tvars:	ds.b	ST_SIZE
 snd_sp:		dc.l	0
+snd_a6:		dc.l	0		; the sound CPU's memory + $8000 (set by the includer)
 snd_latch:	dc.b	0
 snd_held:	dc.b	0
 		even

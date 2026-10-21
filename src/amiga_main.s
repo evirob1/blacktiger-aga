@@ -206,6 +206,11 @@ start:
 	jsr	-30(a6)			; Exec Supervisor(): continue in supervisor mode
 super:
 	move.w	#$2700,sr
+	lea	snd_a6(pc),a0		; a2 (bootblock): the sound program's ROM and
+	move.l	a2,(a0)			; the bank, at its memory's $8000 (src/sound.s),
+	lea	snd_on(pc),a0		; or 0: no room for sound
+	move.l	a2,d0
+	sne	(a0)
 	lea	chipa(pc),a0		; a3 (bootblock): separate chip RAM block, or 0
 	move.l	a3,d0
 	bne.s	.fast
@@ -242,6 +247,13 @@ super:
 	bsr	init_display
 	move.w	#$87e0,DMACON(a6)	; bitplanes, copper, blitter (nasty), sprites
 	move.w	#$c028,INTENA(a6)	; vertical blank + keyboard
+	tst.b	snd_on(pc)
+	beq.s	.quiet
+	bsr	snd_init		; the sound board: its program's start-up,
+	move.l	chipb(pc),a0		; then the player (audio interrupt, level 4)
+	add.l	#CB_AUDIO,a0
+	bsr	play_init
+.quiet
 	move.w	#$2000,sr
 	bra	rt_init			; Z80 power on (never returns)
 
@@ -296,6 +308,13 @@ PLAT_EI	macro				; enable + deliver a vblank that came while disabled
 
 ROM_PRELOADED	equ	1		; (unpack_data copies the fixed ROM)
 	include	"rt_core.s"
+SND_ROM_IN_PLACE equ	1		; (unpacked there: unpack_data)
+	include	"snd_bank.i"		; (tools/sound/bank.py)
+
+SNDLOG	macro				; (the sound program's YM writes: for tests)
+	endm
+	include	"sound.s"		; the sound board's program, translated
+	include	"sound_play.s"		; and its chips' registers made into sound
 
 ; d0 = port -> d0.b = value. Keeps every other register. (a6 = Z80 memory)
 plat_in:
@@ -333,7 +352,21 @@ plat_out:
 	move.l	a0,-(sp)
 	lea	pvars(pc),a0
 	move.b	d0,pv_io(a0,d7.w)
-	cmp.w	#6,d7
+	tst.w	d7
+	bne.s	.n0
+	lea	snd_latch(pc),a0	; port 0: a command for the sound board
+	move.b	d0,(a0)
+	bra.s	.x
+.n0	cmp.w	#4,d7
+	bne.s	.n4
+	tst.b	snd_on(pc)
+	beq.s	.x
+	move.w	sr,-(sp)		; port 4 bit 5: the sound CPU's reset (its
+	ori.w	#$0700,sr		; start-up when released runs in one piece)
+	bsr	snd_reset
+	move.w	(sp)+,sr
+	bra.s	.x
+.n4	cmp.w	#6,d7
 	bne.s	.x
 	movem.l	d0/a2,-(sp)
 	move.w	sr,-(sp)		; in one piece (the display may run at a vblank)
@@ -2480,7 +2513,10 @@ cop_wrest:	dc.w	0
 coplist_ptr:		dc.l	0
 bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py: BSS,
 			dc.l	CHIPA_SIZE		; chip area A in fast RAM mode,
-			dc.l	CHIPB_SIZE		; chip area B)
+			dc.l	CHIPB_SIZE		; chip area B,
+			dc.l	SOUND_SIZE		; its sound part)
+snd_on:			dc.b	0		; room for sound: it plays
+			even
 chipa:			dc.l	0		; chip RAM areas (see the end of the file)
 chipb:			dc.l	0
 
@@ -2494,6 +2530,7 @@ disp_stack_top:
 rev_table:	ds.b	256
 
 	include	"game.s"
+
 
 charblank:	incbin	"charblank.bin"
 	cnop	0,8
@@ -2529,7 +2566,12 @@ CHIPA_SIZE	equ	CA_SAVE0+NBUF*SAVESIZE
 CB_BGTILES	equ	0			; blitter sources
 CB_SPRITES	equ	CB_BGTILES+2048*128
 CB_SPRMASK	equ	CB_SPRITES+2048*128
-CHIPB_SIZE	equ	CB_SPRMASK+2048*32
+CB_AUDIO	equ	CB_SPRMASK+2048*32	; the sound player's output
+CHIPB_SIZE	equ	(CB_AUDIO+PLAY_BUFSIZE+7)&-8
+; the sound data, at the end of the program's block (in fast RAM if any) by
+; the bootblock (src/boot.s), from the disk after the payload: the sound CPU's
+; memory from $C000 (the player's tables in it), its ROM, the bank
+SOUND_SIZE	equ	$4000+$8000+BANK_SIZE
 
 ; BSS: allocated (cleared) by the bootblock right after the loaded file
 	cnop	0,8
@@ -2544,4 +2586,7 @@ bgshadow0	equ	task_stacks+16*1024	; NBUF background shadows
 rec0		equ	bgshadow0+NBUF*SHSIZE	; NBUF object lists
 txshadow	equ	rec0+NBUF*RECSIZE
 palshadow	equ	txshadow+2048		; 1032 bytes
-bss_end		equ	palshadow+1032
+snd_rt		equ	palshadow+1032+8	; the sound CPU's runtime (src/sound.s)
+ym_regs		equ	snd_rt+((RT_SIZE+3)&-4)
+ym_keyon	equ	ym_regs+512
+bss_end		equ	ym_keyon+8

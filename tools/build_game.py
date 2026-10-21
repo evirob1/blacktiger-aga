@@ -3,10 +3,12 @@
 usage:  python tools/build_game.py [--roms roms/blktiger.zip]
 Output: build/blacktiger.adf (60 Hz; --pal for 50 Hz)
 
-Needs Python 3 and vasmm68k_mot (on the PATH, or VASM=path).
+Needs Python 3 and vasmm68k_mot (on the PATH, or VASM=path); for sound also
+numpy, gcc and git (without them the disk is silent).
 """
 import argparse
 import os
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +65,29 @@ def main():
     for p in problems:
         print("  " + p)
 
+    # the sound board: its program, translated, and the instrument bank made
+    # by running it (own processes: the translator's sound mode changes
+    # module settings). The bank needs numpy, gcc and git: without them the
+    # disk is silent.
+    open(os.path.join(out, "snd_rom.bin"), "wb").write(bt_rom.load_roms(a.roms)["audiocpu"])
+    subprocess.run([sys.executable, os.path.join(HERE, "z80", "translate.py"), a.roms,
+                    os.path.join(ROOT, "data", "sound_entries.txt"), os.path.join(out, "sound_code.s"),
+                    os.path.join(out, "sound_report.txt"), "--sound"], check=True)
+    sound = os.path.join(out, "sound.bin")      # (after the payload on the disk: src/boot.s)
+    for stale in (sound, sound + ".at"):
+        if os.path.exists(stale):
+            os.remove(stale)
+    try:
+        subprocess.run([sys.executable, os.path.join(HERE, "sound", "bank.py"),
+                        os.path.join(out, "snd_bank.bin"), os.path.join(out, "snd_bank.i")], check=True)
+        open(sound, "wb").write(open(os.path.join(out, "snd_rom.bin"), "rb").read() +
+                                open(os.path.join(out, "snd_bank.bin"), "rb").read())
+    except (subprocess.CalledProcessError, OSError) as e:
+        print("sound: the instrument bank could not be made (%s): building a silent disk" % e)
+        print("  (it needs numpy - pip install numpy - and gcc and git on the PATH)")
+        open(os.path.join(out, "snd_bank.i"), "w").write("BANK_PATCHES\tequ\t0\nBANK_SIZE\tequ\t0\n")
+        sound = None
+
     boot = os.path.join(ROOT, "build", "boot.bin")
     build.assemble(os.path.join(ROOT, "src", "boot.s"), boot)
     payload = os.path.join(out, "game.bin")
@@ -71,8 +96,9 @@ def main():
                    incdir=out, extra=["-I" + os.path.join(ROOT, "src"), "-L", lst] + (["-DPAL=1"] if a.pal else []))
     at = listing_symbol(lst, "bss_size")
     data = open(payload, "rb").read()
-    bss, chipa, chipb = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big") for i in range(3))
-    mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"), chipa, chipb)
+    bss, chipa, chipb, sound_size = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big") for i in range(4))
+    mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"), chipa, chipb,
+                sound, sound_size, listing_symbol(lst, "bss_end"))
 
 
 if __name__ == "__main__":

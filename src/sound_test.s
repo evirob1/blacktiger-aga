@@ -1,7 +1,8 @@
-; Black Tiger AGA - test build of the translated sound program
-; (tools/harness/sound_check.py): replays the command latch writes, resets
-; and timer interrupts of a MAME run and logs every YM2203 write, to compare
-; with MAME's.
+; Black Tiger AGA - test build of the translated sound program: replays
+; command latch writes, resets and timer interrupts (tools/harness/sound_check.py:
+; those of a MAME run, to compare the YM2203 writes with MAME's) or plays
+; commands with the timers as modelled (tools/sound/bank.py: the instrument
+; patches), logging every YM2203 write.
 ;
 ; Logging: a long to LOG ($F00000) = chip << 16 | register << 8 | value;
 ; TIME ($F00004) = the time now; DONE ($F00008) ends the run.
@@ -22,11 +23,25 @@ SNDLOG	macro
 	move.l	(sp)+,d6
 	endm
 
-start:	bsr	snd_init
+start:	lea	snd_mem+$8000(pc),a0
+	lea	snd_a6(pc),a1
+	move.l	a0,(a1)
+	bsr	snd_init
 	lea	snd_events(pc),a5
+	move.l	(a5)+,d7		; 1: the timers as modelled (src/sound.s), not MAME's
+	moveq	#0,d5			; (now)
 .ev	move.l	(a5)+,d6		; next event: time, what
 	bmi.s	.end
-	move.l	d6,TIME
+	tst.l	d7
+	beq.s	.now
+.run	cmp.l	d6,d5			; run the timers up to it, 8 units at a time
+	bhs.s	.now
+	moveq	#8,d0
+	bsr	snd_timer
+	addq.l	#8,d5
+	move.l	d5,TIME
+	bra.s	.run
+.now	move.l	d6,TIME
 	move.l	(a5)+,d0		; $00-$FF: the latch, $100 / $101: reset
 	btst	#9,d0			; off / on, $200 / $201: timer A / B flag
 	bne.s	.t

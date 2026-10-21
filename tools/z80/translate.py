@@ -319,6 +319,10 @@ class Translator:
                     return T(["pea %s(pc)" % label(*tk)], clob=0, stack=True)
             if args[0] == "af":
                 return T(["move.b d0,-(sp)", "move.w ccr,-(sp)"], clob=CCR_MOVE, stack=True)
+            if self.sound:
+                # every stack item 4 bytes, as a return address (and push af):
+                # code that pops data or a return address alike stays in step
+                return T(["move.l %s,-(sp)" % PAIR[args[0]]], clob=CCR_MOVE, stack=True)
             return T(["move.w %s,-(sp)" % PAIR[args[0]]], clob=CCR_MOVE, stack=True)
         if op == "pop" and self.pops_code(codemap.loc(bank, ins.pc)):
             # consumes the return address (4 bytes on the 68k stack)
@@ -331,6 +335,8 @@ class Translator:
             if args[0] == "af":
                 return T(["move.w (sp)+,d7", "move.b (sp)+,d0", "move.w d7,ccr"], defs=ALL, ok=ALL,
                          stack=True)
+            if self.sound:
+                return T(["move.l (sp)+,d7", "move.w d7,%s" % PAIR[args[0]]], clob=CCR_MOVE, stack=True)
             return T(["move.w (sp)+,%s" % PAIR[args[0]]], clob=CCR_MOVE, stack=True)
         if op == "ex":
             if args == ["de", "hl"]:
@@ -341,7 +347,8 @@ class Translator:
                           "move.w d6,RT_ALT_F(a4)", "move.w d7,ccr"], defs=ALL, ok=ALL, d6=True)
             if args[0] == "(sp)":
                 r = PAIR[args[1]]
-                return T(["move.w (sp),d7", "move.w %s,(sp)" % r, "move.w d7,%s" % r],
+                at = "2(sp)" if self.sound else "(sp)"      # (sound: 4-byte items, value low)
+                return T(["move.w %s,d7" % at, "move.w %s,%s" % (r, at), "move.w d7,%s" % r],
                          clob=CCR_MOVE, stack=True)
         if op == "exx":
             # BC' lives in memory (a1 is the bank pointer); movem/exg leave the flags alone
@@ -489,7 +496,7 @@ class Translator:
             # (followed through calls: escapes to a caller's frame are exact)
             self.pop_kinds = codemap.pop_kinds(self.cm, codemap.SOUND_ENTRY_POINTS)
             conflicts = ["%04x %s: pops %s" % (k[1], self.cm.insns[k].text, "/".join(sorted(v)))
-                         for k, v in self.pop_kinds.items() if len(v) > 1 or "?" in v]
+                         for k, v in self.pop_kinds.items() if "?" in v]
         self.problems += ["stack: " + c for c in conflicts if not c.startswith("00ec ")]
         self.mw_pops = {}
         for key, ins in self.cm.insns.items():
