@@ -176,7 +176,7 @@ pv_f9key	rs.b	1			; F9 held last frame
 pv_ctime	rs.w	1			; time (minutes << 8 | seconds, BCD)
 pv_ctick	rs.w	1			; frames since the time last changed
 pv_usedacc	rs.l	1			; background palettes on screen
-pv_bstate	rs.b	NBUF*BS_SIZE		; per buffer: what its last scan saw
+pv_bstate	rs.b	(NBUF+1)*BS_SIZE	; per buffer (+ clean): what its last scan saw
 pv_layout	rs.w	1			; 0: 64 x 128 tiles, 1: 128 x 64 (port $0E)
 pv_cmask	rs.w	1			; map width in tiles - 1
 pv_vx		rs.w	1			; view position in the map (pixels, signed)
@@ -225,7 +225,9 @@ super:
 	move.l	a1,4(a0)
 	bra.s	.mem
 .fast	move.l	d0,(a0)
-	add.l	#(CHIPA_SIZE+7)&-8,d0
+	lea	clean_on(pc),a1		; (the clean background: room for it)
+	st	(a1)
+	add.l	#(CHIPA_FAST+7)&-8,d0
 	move.l	d0,4(a0)
 .mem	lea	plat_stack_top(pc),sp
 	lea	CUSTOM,a6
@@ -711,6 +713,9 @@ unpack_data:
 	dbf	d7,.sr
 	CHIPA	0,a0			; display buffers: cleared
 	move.l	#CHIPA_SIZE/4,d0
+	tst.b	clean_on(pc)
+	beq.s	.cl
+	move.l	#CHIPA_FAST/4,d0
 .cl	clr.l	(a0)+
 	subq.l	#1,d0
 	bne.s	.cl
@@ -805,7 +810,7 @@ init_display:
 	cmp.w	#160,d0
 	bne.s	.ms
 	lea	pv_bstate(a4),a0	; no scans yet: the first ones look at every cell
-	moveq	#NBUF-1,d0
+	moveq	#NBUF,d0
 .bs	move.w	#-1,BS_INV(a0)
 	lea	BS_SIZE(a0),a0
 	dbf	d0,.bs
@@ -874,15 +879,22 @@ set_buffer:
 	move.l	d0,-(sp)
 	moveq	#0,d0
 	move.w	pv_back(a4),d0
-	mulu.l	#BMSIZE,d0
-	CHIPA	CA_BITMAP0,a0
-	add.l	d0,a0
-	move.l	a0,pv_bm(a4)
-	move.w	pv_back(a4),d0
 	mulu.w	#SHSIZE,d0
 	lea	bgshadow0(pc),a0
 	add.l	d0,a0
 	move.l	a0,pv_sh(a4)
+	cmp.w	#NBUF,pv_back(a4)	; NBUF: the clean background (no objects)
+	bne.s	.disp
+	CHIPA	CA_CLEAN,a0
+	move.l	a0,pv_bm(a4)
+	move.l	(sp)+,d0
+	rts
+.disp	moveq	#0,d0
+	move.w	pv_back(a4),d0
+	mulu.l	#BMSIZE,d0
+	CHIPA	CA_BITMAP0,a0
+	add.l	d0,a0
+	move.l	a0,pv_bm(a4)
 	move.w	pv_back(a4),d0
 	mulu.w	#RECSIZE,d0
 	lea	rec0(pc),a0
@@ -954,8 +966,18 @@ draw_frame:
 	bsr	restore_bobs
 	bsr	update_palette
 	bsr	update_text
+	tst.b	clean_on(pc)
+	bne.s	.clean
 	bsr	update_background
-	bsr	draw_bobs
+	bra.s	.bobs
+.clean	move.w	pv_back(a4),-(sp)	; the clean background, then this buffer's
+	move.w	#NBUF,pv_back(a4)	; cells made the same
+	bsr	set_buffer
+	bsr	update_background
+	move.w	(sp)+,pv_back(a4)
+	bsr	set_buffer
+	bsr	sync_clean
+.bobs	bsr	draw_bobs
 	bsr	build_copper
 	bsr	blit_wait
 	move.w	#$2700,sr
@@ -1030,14 +1052,16 @@ read_inputs:
 ;------------------------------------------------------------------------------
 ; Test mode, toggled with the Help key (not shown: the power LED's bit is
 ; also the audio filter's, which stays on): the strongest weapon ($F3AC =
-; 4); hits do no damage (PLAT_HIT, at the one place the game takes a hit off
-; the armour, $F3AD: holding that value up instead fought the game's own
-; changes to it), and lives and time never go down. Black Tiger's RAM:
+; 4); a potion always there ($F3B0), which a poison attack uses up instead;
+; hits do no damage (PLAT_HIT, at the one place the game takes a hit off the
+; armour, $F3AD: holding that value up instead fought the game's own changes
+; to it), and lives and time never go down. Black Tiger's RAM:
 	Z80	ZF3A0,$f3a0		; lives
 	Z80	ZF3A1,$f3a1		; level (0-7)
 	Z80	ZF3C1,$f3c1		; (player 1's record)
 	Z80	ZF3E1,$f3e1		; (player 2's)
 	Z80	ZF3AC,$f3ac		; weapon (0-4: what the shop sells)
+	Z80	ZF3B0,$f3b0		; potions
 	Z80	ZF3B1,$f3b1		; time: seconds, BCD
 	Z80	ZF3B2,$f3b2		; minutes
 test_mode:
@@ -1082,7 +1106,10 @@ test_mode:
 	cmp.b	#4,(ZF3AC,a0)		; the strongest weapon
 	bhs.s	.wp
 	move.b	#4,(ZF3AC,a0)
-.wp	move.b	(ZF3A0,a0),d0		; lives
+.wp	tst.b	(ZF3B0,a0)		; a potion: a poison attack uses it up
+	bne.s	.pt			; instead ($4824)
+	move.b	#1,(ZF3B0,a0)
+.pt	move.b	(ZF3A0,a0),d0		; lives
 	cmp.b	pv_clives(a4),d0
 	bhs.s	.l2
 	move.b	pv_clives(a4),(ZF3A0,a0)
@@ -1301,7 +1328,7 @@ forget_pal:
 	movem.l	d0-d1/a0,-(sp)
 	addq.w	#1,pv_invgen(a4)
 	lea	bgshadow0(pc),a0
-	move.w	#NBUF*16*NCOLSLOT-1,d1
+	move.w	#(NBUF+1)*16*NCOLSLOT-1,d1
 .l	move.l	(a0)+,d0
 	lsr.w	#3,d0
 	and.w	#15,d0
@@ -1315,7 +1342,7 @@ forget_pal:
 forget_all:
 	addq.w	#1,pv_invgen(a4)
 	lea	bgshadow0(pc),a0
-	move.w	#NBUF*16*NCOLSLOT-1,d1
+	move.w	#(NBUF+1)*16*NCOLSLOT-1,d1
 .l	move.l	#-1,(a0)+
 	dbf	d1,.l
 	rts
@@ -1845,6 +1872,8 @@ restore_bobs:
 	lea	pv_nrec(a4),a0
 	move.w	(a0,d0.w*2),d7
 	beq.s	.x
+	tst.b	clean_on(pc)
+	bne	restore_clean
 	bsr	blit_wait
 	move.l	#-1,BLTAFWM(a6)
 	clr.w	BLTCON1(a6)
@@ -1871,6 +1900,81 @@ restore_bobs:
 	lea	REC_SIZE(a2),a2
 	dbf	d7,.r
 .x	rts
+
+; with the clean background: the same rectangles copied from it (d7 objects)
+restore_clean:
+	bsr	blit_wait
+	move.l	#-1,BLTAFWM(a6)
+	clr.w	BLTCON1(a6)
+	move.w	#$09f0,BLTCON0(a6)
+	move.w	#LINEB-4,BLTAMOD(a6)
+	move.w	#LINEB-4,BLTDMOD(a6)
+	move.l	pv_rec(a4),a2
+	CHIPA	CA_CLEAN,a3
+	sub.l	pv_bm(a4),a3		; clean - this buffer
+	subq.w	#1,d7
+.r	move.l	REC_DEST(a2),a0
+	lea	(a0,a3.l),a1
+	move.w	REC_H(a2),d2
+	lsl.w	#6,d2
+	addq.w	#2,d2			; BLTSIZE: h lines x 2 words
+	moveq	#NPLANES-1,d6
+.p	bsr	blit_wait
+	move.l	a1,BLTAPT(a6)
+	move.l	a0,BLTDPT(a6)
+	move.w	d2,BLTSIZE(a6)
+	add.l	#PLANEALLOC,a0
+	add.l	#PLANEALLOC,a1
+	dbf	d6,.p
+	lea	REC_SIZE(a2),a2
+	dbf	d7,.r
+	rts
+
+; with the clean background: every buffer slot of this buffer that doesn't
+; hold what the clean one does gets its cell from there (or is forgotten
+; with it). Copies only write the clean buffer's bytes, so cells that agree
+; stay right however the memory columns overlap.
+sync_clean:
+	move.l	pv_sh(a4),a2
+	lea	bgshadow0+NBUF*SHSIZE(pc),a3	; (the clean shadow is the last)
+	moveq	#0,d5			; buffer slot
+	moveq	#0,d2			; column slot * 4
+	move.w	#16*NCOLSLOT-1,d7
+	bsr	blit_setup
+	move.w	#LINEB-2,BLTAMOD(a6)
+	move.w	#$09f0,BLTCON0(a6)
+.e	move.l	(a3)+,d0
+	cmp.l	(a2)+,d0
+	beq.s	.n
+	move.l	d0,-4(a2)
+	cmp.l	#-1,d0
+	beq.s	.n
+	move.l	d0,d1			; the cell: slot * 16 lines + memory column
+	swap	d1
+	and.w	#$ff,d1
+	add.w	d1,d1
+	move.w	d5,d3
+	mulu.w	#16*LINEB,d3
+	add.w	d1,d3
+	move.l	pv_bm(a4),a0
+	add.l	d3,a0
+	CHIPA	CA_CLEAN,a1
+	add.l	d3,a1
+	moveq	#NPLANES-1,d6
+.p	bsr	blit_wait
+	move.l	a1,BLTAPT(a6)
+	move.l	a0,BLTDPT(a6)
+	move.w	#(16<<6)|1,BLTSIZE(a6)
+	add.l	#PLANEALLOC,a0
+	add.l	#PLANEALLOC,a1
+	dbf	d6,.p
+.n	addq.w	#4,d2
+	cmp.w	#NCOLSLOT*4,d2
+	bne.s	.c
+	moveq	#0,d2
+	addq.w	#1,d5
+.c	dbf	d7,.e
+	rts
 
 save_bobs:
 	bsr	blit_wait
@@ -2043,8 +2147,11 @@ draw_bobs:
 	move.l	d3,d0
 	swap	d0			; rows
 	add.w	d0,pv_saverows(a4)	; (room to save the background under it?)
+	tst.b	clean_on(pc)
+	bne.s	.room
 	cmp.w	#SAVESIZE/SAVE_ROW,pv_saverows(a4)
 	bhi	.full
+.room
 	move.w	#BUFH,d1
 	sub.w	d5,d1			; lines before the buffer wraps
 	cmp.w	d0,d1
@@ -2084,8 +2191,10 @@ draw_bobs:
 	move.w	d7,(a0,d0.w*2)
 	tst.w	d7
 	beq.s	.x
+	tst.b	clean_on(pc)		; (the clean background: nothing to save)
+	bne.s	.ns
 	bsr	save_bobs
-	bsr	blit_bobs
+.ns	bsr	blit_bobs
 .x	rts
 
 ; d4 = sprite number * 32, a1 = sprite, a0 = its mask -> a1, a0 = x-flipped
@@ -2563,11 +2672,12 @@ cop_wset:	dc.w	0
 cop_wrest:	dc.w	0
 coplist_ptr:		dc.l	0
 bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py: BSS,
-			dc.l	CHIPA_SIZE		; chip area A in fast RAM mode,
+			dc.l	CHIPA_FAST		; chip area A in fast RAM mode,
 			dc.l	CHIPB_SIZE		; chip area B,
 			dc.l	SOUND_SIZE		; its sound part)
 snd_on:			dc.b	0		; room for sound: it plays
 snd_nomusic:		dc.b	0		; music off (effects only): without fast RAM
+clean_on:		dc.b	0		; the clean background buffer (fast RAM)
 			even
 chipa:			dc.l	0		; chip RAM areas (see the end of the file)
 chipb:			dc.l	0
@@ -2615,6 +2725,14 @@ CHIPA_SIZE	equ	CA_SAVE0+NBUF*SAVESIZE
 	ifgt	CHIPA_SIZE-(packed_end-z80rom)
 	fail	"display buffers don't fit in the fixed ROM copy + packed data's space"
 	endif
+; with fast RAM (a chip RAM block of their own) no save areas: a clean copy of
+; the background instead (clean_on), sprites restored from it
+CA_CLEAN	equ	CA_SAVE0
+	ifgt	BMSIZE-NBUF*SAVESIZE
+CHIPA_FAST	equ	CA_CLEAN+BMSIZE
+	else
+CHIPA_FAST	equ	CHIPA_SIZE
+	endif
 CB_BGTILES	equ	0			; blitter sources
 CB_SPRITES	equ	CB_BGTILES+2048*128
 CB_SPRMASK	equ	CB_SPRITES+2048*128
@@ -2634,8 +2752,8 @@ sprrows		equ	chars+2048*16		; per sprite: first row << 8 | rows
 z80mem		equ	sprrows+2048*2
 bgram		equ	z80mem+65536
 task_stacks	equ	bgram+16384
-bgshadow0	equ	task_stacks+16*1024	; NBUF background shadows
-rec0		equ	bgshadow0+NBUF*SHSIZE	; NBUF object lists
+bgshadow0	equ	task_stacks+16*1024	; NBUF background shadows (+ the clean one)
+rec0		equ	bgshadow0+(NBUF+1)*SHSIZE	; NBUF object lists
 txshadow	equ	rec0+NBUF*RECSIZE
 palshadow	equ	txshadow+2048		; 1032 bytes
 snd_rt		equ	palshadow+1032+8	; the sound CPU's runtime (src/sound.s)

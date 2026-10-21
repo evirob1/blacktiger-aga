@@ -91,6 +91,26 @@ static int stale_n;
    offset) that touches it anyway, once - a site missing from data/bg_stores.txt */
 static unsigned int bg_seen[8192];
 static int bg_n, bgsites = -1;
+/* BT_WATCH=offset,len (hex, from the program): print each write there
+   (68k PC, offset, value) */
+static unsigned int watch_lo, watch_hi;
+static int watch_init;
+static void watch_check(unsigned int a, unsigned int v, int size)
+{
+    int init = watch_init;
+    watch_init = 1;
+    if (!init) {
+        init = 1;
+        if (getenv("BT_WATCH")) {
+            unsigned int o = 0, n = 0;
+            sscanf(getenv("BT_WATCH"), "%x,%x", &o, &n);
+            watch_lo = BASE + o; watch_hi = watch_lo + n;
+        }
+    }
+    if (a + size > watch_lo && a < watch_hi)
+        printf("WATCH pc %x: %x <- %x (%d)\n", m68k_get_reg(NULL, M68K_REG_PPC) - BASE, a - BASE, v, size);
+}
+
 static void bg_check(unsigned int a)
 {
     if (bgsites < 0) bgsites = 1;
@@ -228,6 +248,7 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
     a &= 0xffffff;
     waitd(a);
     bg_check(a);
+    if (watch_hi || !watch_init) watch_check(a, v, 1);
     if (a >= 0xdff000 && a < 0xdff200) return;
     if (a >= 0xbfd000 && a < 0xbff000) return;
     mem[a] = v;
@@ -237,6 +258,7 @@ void m68k_write_memory_16(unsigned int a, unsigned int v)
     a &= 0xffffff;
     waitd(a);
     bg_check(a);
+    if (watch_hi || !watch_init) watch_check(a, v, 2);
     if (a >= 0xdff000 && a < 0xdff200) { custom_write(a, v); return; }
     mem[a] = v >> 8;
     mem[a + 1] = v;
@@ -631,6 +653,18 @@ int main(int argc, char **argv)
                     fwrite(mem, 1, BASE > 0x10000 ? MEMSIZE : 0x400000, df);
                     fclose(df);
                     dumpi++;
+                }
+            }
+            /* BT_DUMPFRAMES=from-to/step: dumps at those frames (prefix_fN.bin) */
+            if (getenv("BT_DUMPFRAMES")) {
+                int f0 = 0, f1 = 0, st = 1;
+                sscanf(getenv("BT_DUMPFRAMES"), "%d-%d/%d", &f0, &f1, &st);
+                if (frame >= f0 && frame <= f1 && (frame - f0) % (st > 0 ? st : 1) == 0) {
+                    char dn[256];
+                    snprintf(dn, sizeof dn, "%s_f%d.bin", getenv("BT_DUMP") ? getenv("BT_DUMP") : "build/amiga_mem", frame);
+                    FILE *df = fopen(dn, "wb");
+                    fwrite(mem, 1, BASE > 0x10000 ? MEMSIZE : 0x400000, df);
+                    fclose(df);
                 }
             }
         }
