@@ -115,18 +115,38 @@ def main():
 
     if len(sys.argv) > 4:
         a = Image.open(sys.argv[3]).convert("RGB")
+        # BT_ALIGN=n: the reference moved by up to n pixels each way (the
+        # Amiga may show a view a frame or two older): the best match counts
+        dx = dy = 0
+        n = int(os.environ.get("BT_ALIGN", "0"))
+        if n:
+            import numpy as np
+            A = np.asarray(a).astype(int)
+            B = np.asarray(img.convert("RGB")).astype(int)
+            best = None
+            for oy in range(-n, n + 1):
+                for ox in range(-n, n + 1):
+                    sa = A[max(0, oy):H + min(0, oy), max(0, ox):W + min(0, ox)]
+                    sb = B[max(0, -oy):H + min(0, -oy), max(0, -ox):W + min(0, -ox)]
+                    c = int((sa != sb).any(axis=2).sum())
+                    if best is None or c < best:
+                        best, dx, dy = c, ox, oy
         diff = Image.new("RGB", (W, H))
         d, pa, pb = diff.load(), a.load(), img.load()
         bad = 0
         for y in range(H):
             for x in range(W):
-                if pa[x, y] != pb[x, y]:
+                xb, yb = x - dx, y - dy
+                if not (0 <= xb < W and 0 <= yb < H):
+                    d[x, y] = (0, 0, 64)
+                elif pa[x, y] != pb[xb, yb]:
                     bad += 1
                     d[x, y] = (255, 0, 0)
                 else:
-                    d[x, y] = tuple(v // 3 for v in pb[x, y])
+                    d[x, y] = tuple(v // 3 for v in pb[xb, yb])
         diff.save(sys.argv[4])
-        print("%s: view x %d y %d, %d of %d pixels differ" % (sys.argv[1], sx0, sy0, bad, W * H))
+        print("%s: view x %d y %d, %d of %d pixels differ%s" % (sys.argv[1], sx0, sy0, bad, W * H,
+              " (reference moved %d, %d)" % (dx, dy) if dx or dy else ""))
 
 
 if __name__ == "__main__":

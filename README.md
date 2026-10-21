@@ -85,8 +85,8 @@ game with.
 
 Test mode: the **Help** key switches it on and off (nothing shows it: the
 power LED would, but on an A1200 its switch also turns the audio filter off).
-Hits then do no damage, and lives and time never go down - handy
-for exploring. (Falling into a pit still costs the life you're on, so you
+You then have the strongest weapon, hits do no damage, and lives and time
+never go down - handy for exploring. (Falling into a pit still costs the life you're on, so you
 restart at the last checkpoint, but the game doesn't end.)
 
 If the screen turns red with "UNKNOWN Z80 CODE / BANK xx AT xxxx", the game

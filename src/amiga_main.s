@@ -1029,14 +1029,15 @@ read_inputs:
 
 ;------------------------------------------------------------------------------
 ; Test mode, toggled with the Help key (not shown: the power LED's bit is
-; also the audio filter's, which stays on):
-; hits do no damage (PLAT_HIT, at the one place the game takes a hit off the
-; armour, $F3AD: holding that value up instead fought the game's own changes
-; to it), and lives and time never go down. Black Tiger's RAM:
+; also the audio filter's, which stays on): the strongest weapon ($F3AC =
+; 4); hits do no damage (PLAT_HIT, at the one place the game takes a hit off
+; the armour, $F3AD: holding that value up instead fought the game's own
+; changes to it), and lives and time never go down. Black Tiger's RAM:
 	Z80	ZF3A0,$f3a0		; lives
 	Z80	ZF3A1,$f3a1		; level (0-7)
 	Z80	ZF3C1,$f3c1		; (player 1's record)
 	Z80	ZF3E1,$f3e1		; (player 2's)
+	Z80	ZF3AC,$f3ac		; weapon (0-4: what the shop sells)
 	Z80	ZF3B1,$f3b1		; time: seconds, BCD
 	Z80	ZF3B2,$f3b2		; minutes
 test_mode:
@@ -1078,7 +1079,10 @@ test_mode:
 	move.w	d0,pv_ctime(a4)
 .on	tst.b	pv_cheat(a4)
 	beq.s	.x
-	move.b	(ZF3A0,a0),d0		; lives
+	cmp.b	#4,(ZF3AC,a0)		; the strongest weapon
+	bhs.s	.wp
+	move.b	#4,(ZF3AC,a0)
+.wp	move.b	(ZF3A0,a0),d0		; lives
 	cmp.b	pv_clives(a4),d0
 	bhs.s	.l2
 	move.b	pv_clives(a4),(ZF3A0,a0)
@@ -1707,8 +1711,10 @@ blit_wait:
 	rts
 
 ; draw cell: d0 = key, d2 = shadow offset, d4 = memory column, d5 = slot.
-; Column M also covers the memory of column M-24 one slot down and M+24 one
-; slot up: forget those if the shadow says they are there.
+; Column M shares memory with every column M+24k, k lines up: drawing it
+; covers the first k lines of M-24k one slot down and the last k of M+24k one
+; slot up (k > 1 after a jump of the view, e.g. out of a shop): forget those
+; if the shadow says they are there.
 bg_draw:
 	movem.l	d0-d7/a0/a2-a3,-(sp)
 	move.l	pv_sh(a4),a3
@@ -1717,22 +1723,18 @@ bg_draw:
 	and.w	#15,d1
 	mulu.w	#NCOLSLOT*4,d1
 	add.w	d2,d1
-	move.b	1(a3,d1.w),d3		; column held one slot down
-	move.w	d4,d6
-	sub.w	#NCOLSLOT,d6
-	cmp.b	d6,d3
-	bne.s	.n1
+	move.b	1(a3,d1.w),d3		; column held one slot down: if left of
+	cmp.b	d4,d3			; this one (M - 24k: its first k lines are
+	bhs.s	.n1			; drawn over), forget it
 	move.l	#-1,(a3,d1.w)
 .n1	move.w	d5,d1
 	subq.w	#1,d1
 	and.w	#15,d1
 	mulu.w	#NCOLSLOT*4,d1
 	add.w	d2,d1
-	move.b	1(a3,d1.w),d3		; column held one slot up
-	move.w	d4,d6
-	add.w	#NCOLSLOT,d6
-	cmp.b	d6,d3
-	bne.s	.n2
+	move.b	1(a3,d1.w),d3		; column held one slot up: if right of
+	cmp.b	d4,d3			; this one (M + 24k: its last k lines), or
+	bls.s	.n2			; nothing (-1)
 	move.l	#-1,(a3,d1.w)
 .n2	move.l	pv_bm(a4),a0
 	move.w	d5,d1
