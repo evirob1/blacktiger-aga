@@ -337,20 +337,24 @@ void harness_hook(unsigned int pc)
         if (mem[indisp_addr]) { disp_cycles += t - hook_last; disp_clock += t - hook_last; }
         hook_last = t;
     }
-    /* audio: a block starts (latching AUDxLC / LEN): record it, interrupt */
+    /* audio: a block starts (latching AUDxLC / LEN): the one before it is
+       recorded now, at the volumes it played at (set as it started); interrupt */
     if (aud_on && T() >= aud_next) {
-        unsigned int n = aud_len[0] * 2;
-        if (wav && n) {
-            for (unsigned int i = 0; i < n; i++) {
-                int l = (signed char)mem[(aud_lc[0] + i) & 0xffffff] * (int)aud_vol[0] +
-                        (signed char)mem[(aud_lc[3] + i) & 0xffffff] * (int)aud_vol[3];
-                int r = (signed char)mem[(aud_lc[1] + i) & 0xffffff] * (int)aud_vol[1] +
-                        (signed char)mem[(aud_lc[2] + i) & 0xffffff] * (int)aud_vol[2];
+        static unsigned int play_lc[4], play_n;
+        if (wav && play_n) {
+            for (unsigned int i = 0; i < play_n; i++) {
+                int l = (signed char)mem[(play_lc[0] + i) & 0xffffff] * (int)aud_vol[0] +
+                        (signed char)mem[(play_lc[3] + i) & 0xffffff] * (int)aud_vol[3];
+                int r = (signed char)mem[(play_lc[1] + i) & 0xffffff] * (int)aud_vol[1] +
+                        (signed char)mem[(play_lc[2] + i) & 0xffffff] * (int)aud_vol[2];
                 short o[2] = { (short)(l * 2), (short)(r * 2) };
                 fwrite(o, 2, 2, wav);
             }
-            wav_frames += n;
+            wav_frames += play_n;
         }
+        unsigned int n = aud_len[0] * 2;
+        for (int c = 0; c < 4; c++) play_lc[c] = aud_lc[c];
+        play_n = n;
         aud_next += (unsigned long long)(n ? n : 2) * (aud_per[0] ? aud_per[0] : 256) * 4;
         if (intena & 0x80) { aud_pending = 1; set_ipl(); m68k_end_timeslice(); }
     }

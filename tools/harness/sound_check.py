@@ -5,7 +5,11 @@ tools/harness/sound_sim.c) and compare the YM2203 writes, in order. (The
 timers themselves, modelled in src/sound.s, only set the tempo: here the
 interrupts come when they did in MAME.)
 
-usage: python3 tools/harness/sound_check.py analysis/sound/ym_check.txt
+usage: python3 tools/harness/sound_check.py analysis/sound/ym_check.txt [--modelled STEP]
+
+--modelled STEP: the timers as modelled (src/sound.s), run STEP units at a
+time as the player does (a chunk: about 517), with only the latch writes and
+resets from MAME: checks the tempo - when the key-ons come, against MAME.
 """
 import os
 import subprocess
@@ -56,6 +60,7 @@ def simulate():
 
 def main():
     log = sys.argv[1]
+    step = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[2] == "--modelled" else 0
     os.makedirs(B, exist_ok=True)
     # events: latch writes, resets, and the timer interrupts as MAME ran them
     # (each interrupt's first write: reg $24 = timer A's, $26 = timer B's; the
@@ -72,7 +77,7 @@ def main():
                     first[f[3]] = False
                 else:
                     pending = 0x200 if f[3] == "24" else 0x201
-            elif f[2] == "0" and f[3] == "27" and pending is not None:
+            elif f[2] == "0" and f[3] == "27" and pending is not None and not step:
                 events.append((float(f[5]) + 20e-6, pending))   # (~ when it reads the latch)
                 pending = None
         elif f[0] == "L":
@@ -83,7 +88,7 @@ def main():
                 first = {"24": True, "26": True}
     events.sort()
     with open(os.path.join(B, "sound_events.s"), "w") as o:
-        o.write("snd_events:\n\tdc.l\t0\n")
+        o.write("snd_events:\n\tdc.l\t%d\n" % step)
         for t, v in events:
             o.write("\tdc.l\t%d,$%02x\n" % (round(t * UNITS), v))
         o.write("\tdc.l\t-1\n")
@@ -95,6 +100,8 @@ def main():
             ours.append((int(f[2]), int(f[3], 16), int(f[4], 16), int(f[1]) / UNITS))
         else:
             print(line)
+    if step:
+        return tempo(ours, mame)
     n = min(len(ours), len(mame))
     for i in range(n):
         if ours[i][:3] != mame[i][:3]:
@@ -106,6 +113,34 @@ def main():
     worst = max((abs(ours[i][3] - mame[i][3]) for i in range(n)), default=0)
     print("%d of %d YM writes matched MAME in order (MAME logged %d); timing within %.1f ms"
           % (n, len(ours), len(mame), worst * 1000))
+    return 0
+
+
+def tempo(ours, mame):
+    """Key-ons (register $28, slots on) in order: how far ours drift from MAME's."""
+    for nm, w in (("ours", ours), ("MAME", mame)):
+        print("%s: %d timer A writes ($24), %d timer B ($26), %d acknowledges ($27) up to %.1f s" % (
+            nm, sum(1 for x in w if x[0] == 0 and x[1] == 0x24 and x[3] < 56),
+            sum(1 for x in w if x[0] == 0 and x[1] == 0x26 and x[3] < 56),
+            sum(1 for x in w if x[0] == 0 and x[1] == 0x27 and x[3] < 56), 56))
+
+    def keyons(w):
+        return [(c, v, t) for c, r, v, t in w if r == 0x28 and v >> 4]
+    a, b = keyons(ours), keyons(mame)
+    n = 0
+    while n < min(len(a), len(b)) and a[n][:2] == b[n][:2]:
+        n += 1
+    d = sorted(x[2] - y[2] for x, y in zip(a[:n], b[:n]))
+    print("%d key-ons (MAME %d), the first %d in the same order" % (len(a), len(b), n))
+    if n:
+        print("time against MAME's: median %+.1f ms, from %+.1f to %+.1f ms" %
+              (1000 * d[n // 2], 1000 * d[0], 1000 * d[-1]))
+    if n < min(len(a), len(b)):
+        print("then ours %s at %.4f s, MAME's %s at %.4f s" % (a[n][:2], a[n][2], b[n][:2], b[n][2]))
+    for i in range(0, n, max(1, n // 12)):
+        print("  key-on %4d: ours %8.3f s, MAME %8.3f s" % (i, a[i][2], b[i][2]))
+    span = (a[-1][2] - a[0][2]) / max(b[-1][2] - b[0][2], 1e-9) if a and b else 0
+    print("from first to last key-on: %.3f x MAME's time" % span)
     return 0
 
 

@@ -49,7 +49,7 @@ def patch_hash(regs, ch):
 def capture():
     """Play every command; the patches keyed on: {hash: {patch key: {frequency: count}}}."""
     t = UNITS
-    lines = ["snd_events:", "\tdc.l\t1"]
+    lines = ["snd_events:", "\tdc.l\t8"]      # (the timers as modelled, 8 units a step)
     for cmd in MUSIC + EFFECTS:
         lines.append("\tdc.l\t%d,$%02x" % (t, cmd))
         lines.append("\tdc.l\t%d,$ff" % (t + 800))

@@ -207,10 +207,37 @@ def build(rom, dynamic_path=None, sound=False):
         object_handlers(cm)
         level_objects(cm)
         object_scripts(cm)
+        task_entries(cm)
         multiway_returns(cm)
         if len(cm.insns) == n:
             break
     return cm
+
+
+TASK_CREATE = 0x00F6
+
+
+def task_entries(cm):
+    """Tasks the scheduler starts: ld bc,entry / call $00F6, anywhere in the
+    ROM (the code that does it may itself be reached only by computed jumps
+    nothing traced). An entry sets its stack first (ld sp,nn), which tells
+    them from data that happens to look the same; an entry at $8000-$BFFF is
+    in the bank of the code starting it."""
+    rom = cm.rom
+    for m in re.finditer(rb"\x01(..)\xcd" + bytes([TASK_CREATE & 0xFF, TASK_CREATE >> 8]), rom, re.S):
+        at, t = m.start(), m.group(1)[0] | m.group(1)[1] << 8
+        if 0x8000 <= at < 0x10000:
+            continue
+        bank = None if at < 0x8000 else (at - 0x10000) // 0x4000
+        if t < 0x8000:
+            k = loc(None, t)
+        elif t < 0xC000 and bank is not None:
+            k = loc(bank, t)
+        else:
+            continue
+        if Space(rom, k[0])[t] == 0x31 and k not in cm.insns:
+            cm.entries.add(k)
+            cm.add(*k)
 
 
 def main():

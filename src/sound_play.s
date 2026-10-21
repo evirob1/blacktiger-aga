@@ -54,7 +54,8 @@ V_POS		rs.l	1		; 16.16
 V_STEP		rs.l	1		; 16.16
 V_END		rs.l	1		; length << 16
 V_LOOP		rs.l	1		; loop length << 16 (0: one-shot)
-V_VOL		rs.l	1		; play_vols row (0: silent)
+V_VOL		rs.l	1		; volume 1-64 (0: silent)
+V_ROW		rs.l	1		; its play_vols row, as the channel is scaled
 V_PATCH		rs.l	1		; bank patch (FM)
 V_REL		rs.w	1		; extra attenuation (1/16 TL steps): release, fade
 V_FADED		rs.w	1		; (how much of the decay's rest is done)
@@ -70,6 +71,7 @@ PV_NOISE	rs.l	1
 PV_PATCHES	rs.l	1		; the bank
 PV_SAMPLES	rs.l	1
 PV_ATTVOL	rs.b	128		; attenuation (TL steps) -> volume 0-64
+PV_NEXTVOL	rs.b	4		; per channel: Paula volume for the half mixed
 PV_SIZE		rs.b	0
 
 ; in the sound CPU's memory window (offsets from snd_a6, its $8000)
@@ -121,7 +123,11 @@ play_init:
 .col	move.b	d2,d3
 	ext.w	d3
 	muls.w	d1,d3
-	divs.w	#192,d3
+	bmi.s	.neg			; (rounded)
+	add.l	#96,d3
+	bra.s	.div
+.neg	sub.l	#96,d3
+.div	divs.w	#192,d3
 	move.b	d3,(a0)+
 	addq.w	#1,d2
 	cmp.w	#256,d2
@@ -165,6 +171,15 @@ play_irq:
 	move.w	#$0080,INTREQ(a6)
 	move.l	snd_a6(pc),a4
 	lea	SW_VARS(a4),a4
+	moveq	#0,d0			; the half mixed last starts now: its
+	move.b	PV_NEXTVOL(a4),d0	; channels' volumes (play_mix)
+	move.w	d0,AUD0LC+8(a6)
+	move.b	PV_NEXTVOL+1(a4),d0
+	move.w	d0,AUD0LC+$18(a6)
+	move.b	PV_NEXTVOL+2(a4),d0
+	move.w	d0,AUD0LC+$28(a6)
+	move.b	PV_NEXTVOL+3(a4),d0
+	move.w	d0,AUD0LC+$38(a6)
 	move.w	PV_HALF(a4),d0
 	move.l	PV_BUF(a4),a0
 	mulu.w	#CHUNK,d0
@@ -361,10 +376,7 @@ fm_update:
 	bne.s	.vv
 	clr.l	V_VOL(a5)		; (silent for now: not mixed)
 	bra.s	.pitch
-.vv	bsr	vol_row
-	lsl.l	#8,d3
-	add.l	PV_VOLS(a4),d3
-	move.l	d3,V_VOL(a5)
+.vv	move.l	d3,V_VOL(a5)
 .pitch	moveq	#0,d0			; pitch: (fnum << block) * K >> 8
 	move.b	$a4(a2,d5.w),d0
 	moveq	#7,d1
@@ -426,11 +438,6 @@ ssg_update:
 	moveq	#0,d1
 	move.b	ssg_vols(pc,d0.w),d1
 	beq	.off
-	exg	d1,d3
-	bsr	vol_row
-	exg	d1,d3
-	lsl.l	#8,d1
-	add.l	PV_VOLS(a4),d1
 	move.l	d1,V_VOL(a5)
 	rts
 .off	clr.l	V_BASE(a5)
@@ -462,8 +469,36 @@ play_mix:
 	add.l	d0,a3			; channel 0's half
 	lea	PV_VOICES(a4),a5
 	moveq	#4-1,d7			; channels
-.ch	movem.l	d7/a3/a5,-(sp)
-	bsr.s	mix_channel
+.ch	moveq	#0,d6			; the channel's loudest voice: Paula's
+	move.l	a5,a0			; volume for it (as the half starts), the
+	moveq	#3-1,d5			; voices scaled to it (the 8 bits used to
+.m	tst.l	V_BASE(a0)		; the full)
+	beq.s	.mn
+	move.l	V_VOL(a0),d0
+	cmp.w	d6,d0
+	bls.s	.mn
+	move.w	d0,d6
+.mn	lea	V_SIZE(a0),a0
+	dbf	d5,.m
+	moveq	#3,d0
+	sub.w	d7,d0
+	move.b	d6,PV_NEXTVOL(a4,d0.w)
+	beq.s	.mix
+	move.l	a5,a0
+	moveq	#3-1,d5
+.r	move.l	V_VOL(a0),d3
+	beq.s	.rn
+	lsl.w	#6,d3			; v * 64 / loudest
+	divu.w	d6,d3
+	bsr	vol_row
+	and.l	#$ffff,d3
+	lsl.l	#8,d3
+	add.l	PV_VOLS(a4),d3
+	move.l	d3,V_ROW(a0)
+.rn	lea	V_SIZE(a0),a0
+	dbf	d5,.r
+.mix	movem.l	d7/a3/a5,-(sp)
+	bsr	mix_channel
 	movem.l	(sp)+,d7/a3/a5
 	lea	3*V_SIZE(a5),a5
 	lea	2*CHUNK(a3),a3
@@ -555,7 +590,7 @@ MIX_IN	macro	; n, an, vn, pn
 	move.l	V_BASE(\3),\2
 	move.l	V_POS(\3),\4
 	swap	\4
-	move.l	V_VOL(\3),\3
+	move.l	V_ROW(\3),\3
 	endm
 MIX_STEP macro	; n, where (its add.l #imm), or a register
 	move.l	MF_LIST+4*\1(sp),a6

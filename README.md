@@ -62,9 +62,10 @@ program, the arcade's memory and the sound data go there and only the graphics
 and the sound output stay in chip RAM, which makes the busy scenes noticeably
 smoother. The same disk does both, automatically.
 
-Sound costs CPU time: on a stock A1200 about a quarter to a third of it, so
-the display drops frames more often than without (the game itself still runs
-at full speed); with fast RAM about a fifth.
+Sound costs CPU time: the arcade's sound program runs about 500 times a
+second, and its 12 voices are mixed in software. On a stock A1200 that is
+nearly half of the CPU, so the display drops frames more often than without
+(the game itself still runs at full speed); with fast RAM about a third.
 
 The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
 arcade's own frame rate: the game runs at the original speed. That needs a
@@ -75,6 +76,9 @@ Controls: joystick in port 2 (fire = attack, second button or Space = jump,
 or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
 **2** = 2 players. Not there yet: scenery drawn in front of sprites (sprites
 currently always appear on top).
+
+Level select (for testing): **F1**-**F8** before starting a game makes it
+start at that level (1-8), with the equipment you start the game with.
 
 Test mode: the **Help** key switches it on and off (the power LED dims while
 it is on). Hits then do no damage, and lives and time never go down - handy

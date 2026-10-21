@@ -48,26 +48,51 @@ snd_timer:
 	movem.l	d0-d7/a0-a6,-(sp)
 	lea	snd_sp(pc),a0		; (a reset ends in the idle loop: back to here)
 	move.l	sp,(a0)
-	lea	snd_rt(pc),a4
-	move.l	snd_a6(pc),a6
-	lea	ym_regs(pc),a0
 	lea	snd_tvars(pc),a1
+	move.l	d0,ST_LEFT(a1)
+	bne.s	.run
+	clr.l	ST_BUSY(a1)		; (0: an interrupt now - tests)
+.run	move.l	snd_a6(pc),a6
 	move.b	snd_latch(pc),(SZC800,a6)
+; in steps from one overflow to the next: each runs the interrupt routine
+.step	lea	ym_regs(pc),a0
+	lea	snd_tvars(pc),a1
 	move.b	$27(a0),d1		; timer control
-	btst	#0,d1			; timer A running?
+	move.l	ST_LEFT(a1),d5		; d5: the time to the next overflow (or
+	btst	#0,d1			; the end)
+	beq.s	.na
+	cmp.l	ST_REMA(a1),d5
+	ble.s	.na
+	move.l	ST_REMA(a1),d5
+.na	btst	#1,d1
 	beq.s	.nb
-	sub.l	d0,ST_REMA(a1)
+	cmp.l	ST_REMB(a1),d5
+	ble.s	.nb
+	move.l	ST_REMB(a1),d5
+.nb	tst.l	ST_BUSY(a1)
+	ble.s	.nbusy
+	cmp.l	ST_BUSY(a1),d5
+	ble.s	.nbusy
+	move.l	ST_BUSY(a1),d5
+.nbusy	tst.l	d5
+	bpl.s	.adv
+	moveq	#0,d5
+.adv	sub.l	d5,ST_LEFT(a1)
+	sub.l	d5,ST_BUSY(a1)
+	btst	#0,d1			; timer A running?
+	beq.s	.ta
+	sub.l	d5,ST_REMA(a1)
 .a	tst.l	ST_REMA(a1)		; overflow: reload (the period now) and
-	bgt.s	.nb			; flag it if enabled
+	bgt.s	.ta			; flag it if enabled
 	bsr	period_a
 	add.l	d2,ST_REMA(a1)
 	btst	#2,d1
 	beq.s	.a
 	bset	#0,ST_STATUS(a1)
 	bra.s	.a
-.nb	btst	#1,d1			; timer B running?
+.ta	btst	#1,d1			; timer B running?
 	beq.s	.irq
-	sub.l	d0,ST_REMB(a1)
+	sub.l	d5,ST_REMB(a1)
 .b	tst.l	ST_REMB(a1)
 	bgt.s	.irq
 	bsr	period_b
@@ -76,20 +101,31 @@ snd_timer:
 	beq.s	.b
 	bset	#1,ST_STATUS(a1)
 	bra.s	.b
-.irq	tst.b	snd_held-snd_tvars(a1)	; held in reset: no interrupts
-	bne.s	.x
-	moveq	#2-1,d7			; the interrupt line follows the flags:
-.i	moveq	#3,d1			; again while one is still set (at most twice)
+.irq	tst.l	ST_BUSY(a1)		; still in the last interrupt: not yet
+	bgt.s	.next
+	tst.b	snd_held-snd_tvars(a1)	; held in reset: no interrupts
+	bne.s	.next
+	moveq	#3,d1			; the interrupt line follows the flags
 	and.b	ST_STATUS(a1),d1
-	beq.s	.x
+	beq.s	.next
 	move.b	d1,(SZE000,a6)
-	move.w	d7,-(sp)
+	lea	snd_rt(pc),a4
+	sub.l	a5,a5			; (the translation counts T-states in a5)
 	bsr	s_0038
-	move.w	(sp)+,d7
+	move.l	snd_a6(pc),a6
 	lea	snd_tvars(pc),a1
-	dbf	d7,.i
-.x	movem.l	(sp)+,d0-d7/a0-a6
+	move.l	a5,d0			; how long it took the Z80: the timers run
+	add.l	#ISR_BASE,d0		; on meanwhile, their overflows only set
+	divu.w	#72,d0			; the flags (a long one misses ticks)
+	and.l	#$ffff,d0
+	move.l	d0,ST_BUSY(a1)
+.next	tst.l	ST_LEFT(a1)
+	bgt	.step
+	movem.l	(sp)+,d0-d7/a0-a6
 	rts
+
+ISR_BASE	equ	50		; T-states: taking the interrupt, reti
+YM_WRITE	equ	170		; T-states: a YM write with its wait for the chip
 
 ; a0 = ym_regs -> d2.l = timer A's period: 1024 - (r24 << 2 | r25 & 3)
 period_a:
@@ -126,6 +162,7 @@ s_0162:	move.w	ccr,-(sp)
 	moveq	#2,d6
 	and.w	d5,d6
 ym_write:
+	lea	YM_WRITE(a5),a5		; (its time, src/sound.s: snd_timer)
 	lsr.w	#1,d6			; chip 0 / 1
 	move.w	d2,d7
 	lsr.w	#8,d7			; value
@@ -256,6 +293,8 @@ snd_lookup:
 	rsreset
 ST_REMA		rs.l	1		; time to timer A's next overflow
 ST_REMB		rs.l	1
+ST_LEFT		rs.l	1		; snd_timer: the time still to run
+ST_BUSY		rs.l	1		; the interrupt routine still running for
 ST_STATUS	rs.b	1		; bit 0: timer A flag, bit 1: timer B
 		rs.b	1
 ST_SIZE		rs.b	0

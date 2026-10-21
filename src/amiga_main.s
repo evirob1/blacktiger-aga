@@ -170,7 +170,7 @@ pv_palcnt	rs.b	32			; draw_row: characters per text palette
 pv_cheat	rs.b	1			; test mode (Help key): no damage, lives, time
 pv_helpkey	rs.b	1			; Help key held last frame
 pv_clives	rs.b	1			; test mode: lives kept at least at this
-		rs.b	1
+pv_level	rs.b	1			; F1-F8: start the next game at level 1-8 (0: as usual)
 pv_ctime	rs.w	1			; time (minutes << 8 | seconds, BCD)
 pv_ctick	rs.w	1			; frames since the time last changed
 pv_usedacc	rs.l	1			; background palettes on screen
@@ -300,6 +300,21 @@ PLAT_HIT macro				; test mode: a hit does no damage (c)
 	beq.s	.nohit\@
 	clr.b	d1
 .nohit\@
+	endm
+
+PLAT_LEVEL macro			; a player's turn starts ($2269, iy = the
+	tst.b	(pvars+pv_level,pc)	; player's record, copied to $F3A0): the
+	beq.s	.nolevel\@		; level chosen with F1-F8, for the first
+	move.l	a0,-(sp)		; (flags: none live here)
+	lea	pvars+pv_level(pc),a0
+	move.b	(a0),-(sp)
+	clr.b	(a0)
+	move.b	(sp)+,d7
+	subq.b	#1,d7
+	move.b	d7,(ZF3A1,a6)
+	move.b	d7,(1,a6,d5.w)
+	move.l	(sp)+,a0
+.nolevel\@
 	endm
 
 PLAT_EI	macro				; enable + deliver a vblank that came while disabled
@@ -1006,10 +1021,17 @@ read_inputs:
 ; armour, $F3AD: holding that value up instead fought the game's own changes
 ; to it), and lives and time never go down. Black Tiger's RAM:
 	Z80	ZF3A0,$f3a0		; lives
+	Z80	ZF3A1,$f3a1		; level (0-7)
 	Z80	ZF3B1,$f3b1		; time: seconds, BCD
 	Z80	ZF3B2,$f3b2		; minutes
 test_mode:
 	lea	z80mem+$8000(pc),a0
+	moveq	#8-1,d0			; F1-F8: the level the next game starts at
+.lk	tst.b	pv_keys+$50(a4,d0.w)	; (PLAT_LEVEL)
+	beq.s	.lk2
+	move.b	d0,pv_level(a4)
+	addq.b	#1,pv_level(a4)
+.lk2	dbf	d0,.lk
 	tst.b	pv_keys+$5f(a4)		; Help: toggle on press
 	sne	d0
 	move.b	pv_helpkey(a4),d1

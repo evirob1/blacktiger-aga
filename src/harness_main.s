@@ -30,6 +30,9 @@ PLAT_DI	macro
 PLAT_HIT macro
 	endm
 
+PLAT_LEVEL macro
+	endm
+
 PLAT_EI	macro				; the harness raises interrupts itself
 	st	RT_IE(a4)
 	endm

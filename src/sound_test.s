@@ -28,17 +28,18 @@ start:	lea	snd_mem+$8000(pc),a0
 	move.l	a0,(a1)
 	bsr	snd_init
 	lea	snd_events(pc),a5
-	move.l	(a5)+,d7		; 1: the timers as modelled (src/sound.s), not MAME's
+	move.l	(a5)+,d7		; not 0: the timers as modelled (src/sound.s), not
+					; MAME's, run d7 units at a time
 	moveq	#0,d5			; (now)
 .ev	move.l	(a5)+,d6		; next event: time, what
 	bmi.s	.end
 	tst.l	d7
 	beq.s	.now
-.run	cmp.l	d6,d5			; run the timers up to it, 8 units at a time
+.run	cmp.l	d6,d5			; run the timers up to it
 	bhs.s	.now
-	moveq	#8,d0
+	move.l	d7,d0
 	bsr	snd_timer
-	addq.l	#8,d5
+	add.l	d7,d5
 	move.l	d5,TIME
 	bra.s	.run
 .now	move.l	d6,TIME
