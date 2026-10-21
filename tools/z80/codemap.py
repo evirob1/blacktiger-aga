@@ -162,6 +162,7 @@ def build(rom, dynamic_path=None):
         gap_routines(cm)
         bank_entry_tables(cm)
         object_handlers(cm)
+        level_objects(cm)
         object_scripts(cm)
         multiway_returns(cm)
         if len(cm.insns) == n:
@@ -451,6 +452,39 @@ def object_handlers(cm):
                     cm.add(*e)
                 code = cm.code_bytes()
             i = data.find(HANDLER_PREFIX, i + 1)
+
+
+LEVEL_OBJECTS = 0x1E07     # per level: bank 5 table of the screens' object lists
+
+
+def level_objects(cm):
+    """The objects each level places ($1BD0-$1C00, $1DEA): $1E07 + 2 * level
+    points at a table in bank 5 of up to 33 lists (one per screen), each of
+    8-byte records up to a $FFFF word: +4 handler address, +6 its bank. Every
+    handler of every level is an entry (only level 1's were ever traced)."""
+    rom = cm.rom
+    sp = Space(rom, 5)
+    w = lambda a: sp[a] | sp[a + 1] << 8
+    for level in range(8):
+        table = rom[LEVEL_OBJECTS + 2 * level] | rom[LEVEL_OBJECTS + 2 * level + 1] << 8
+        for screen in range(1, 34):
+            rec = w(table + 2 * screen)
+            if not 0x8000 <= rec < 0xC000:
+                continue
+            found = []
+            for _ in range(64):
+                if w(rec) == 0xFFFF:
+                    break
+                h, bank = w(rec + 4), sp[rec + 6]
+                if bank > 15 or not 0x0100 <= h < 0xC000:
+                    found = []          # not a list (past the level's screens)
+                    break
+                found.append(loc(bank, h))
+                rec += 8
+            for k in found:
+                if k not in cm.insns:
+                    cm.entries.add(k)
+                    cm.add(*k)
 
 
 def object_scripts(cm):

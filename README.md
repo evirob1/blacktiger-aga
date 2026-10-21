@@ -106,6 +106,9 @@ tools/build_game.py   one-command build of build/blacktiger.adf
 tools/harness/amiga_sim.*     runs the A1200 build on Musashi (speed, memory dumps)
 tools/harness/render_frame.py draws a frame from such a dump, following the copper list
 tools/harness/render_arcade.py draws the same frame the way MAME does, and compares
+tools/harness/uss.py          unpacks a WinUAE save state for amiga_sim to carry on from
+                              (BT_RESUME, BT_BASE; BT_RANDJOY=seed plays at random;
+                              BT_POKEAT=offset:addr:value e.g. starts a game on level N)
 tools/lzpack.py       packer for the disk data (unpacked at boot)
 tools/harness/        68k test harness (Musashi) that checks the translation against MAME
 data/code_entries.txt Z80 code addresses seen running in MAME (addresses only)

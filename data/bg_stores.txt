@@ -8,3 +8,9 @@ ff 0931  ld (hl),$00
 ff 0943  ld (hl),$00
 ff 2af7  ld (de),a
 ff 2afb  ld (de),a
+ff 5de4  ld (de),a	level change: the next level's background patches ($8D90, bank 4)
+ff 5de8  ld (de),a
+02 b951  ld (de),a	a level 3 object changing the scenery
+02 b955  ld (de),a
+02 b95f  ld (de),a
+02 b963  ld (de),a

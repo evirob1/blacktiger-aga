@@ -57,12 +57,16 @@ static unsigned int rd32(unsigned int a) { return rd16(a) << 16 | rd16(a + 2); }
 static int BLIT_CYC = 6;                /* BT_BLIT_CYC overrides */
 static unsigned long long blit_busy;
 
+/* BT_RANDJOY=seed: a random joystick in port 2 (a new direction and fire
+   button every few frames), to play on from a save state */
+static unsigned int joy1dat, joyfire;
 static unsigned int custom_read(unsigned int reg)
 {
     switch (reg & 0x1fe) {
     case 0x002: return T() < blit_busy ? 0x4000 : 0;   /* DMACONR: BBUSY */
     case 0x004: return 0;                          /* VPOSR */
     case 0x006: return (unsigned int)(now / 64) & 0xffff;   /* VHPOSR moves */
+    case 0x00c: return joy1dat;                    /* JOY1DAT (BT_RANDJOY) */
     case 0x016: return 0xffff;                     /* POTINP: buttons up */
     case 0x01e: return irq_pending ? 0x0020 : 0;   /* INTREQR */
     default: return 0;
@@ -108,7 +112,7 @@ unsigned int m68k_read_memory_8(unsigned int a)
     waitd(a);
     stale_check(a);
     if (a >= 0xdff000 && a < 0xdff200) return (a & 1) ? custom_read(a) & 0xff : custom_read(a) >> 8;
-    if (a >= 0xbfd000 && a < 0xbff000) return 0xff;
+    if (a >= 0xbfd000 && a < 0xbff000) return a == 0xbfe001 && joyfire ? 0x7f : 0xff;
     return rd8(a);
 }
 unsigned int m68k_read_memory_16(unsigned int a)
@@ -238,6 +242,8 @@ static unsigned int idle_lo, idle_hi, rt_start, rt_end;
 static unsigned long long idle_cycles, rt_cycles, rt_t0, rt_calls, idle_last;
 static int in_rt;
 
+static int z80(unsigned int addr);
+static int sim_frame;
 void harness_hook(unsigned int pc)
 {
     {
@@ -266,6 +272,25 @@ void harness_hook(unsigned int pc)
             last_probe = i;
             probe_t = t;
         }
+    /* BT_POKEAT=offset:z80addr:value,...: when the program reaches offset (hex,
+       from the listing), write value into the arcade's memory - once each
+       (e.g. the level number at the start of a game); BT_POKEFROM=frame:
+       not before that frame */
+    if (getenv("BT_POKEAT") && sim_frame >= (getenv("BT_POKEFROM") ? atoi(getenv("BT_POKEFROM")) : 0)) {
+        static unsigned int done;
+        char *p = getenv("BT_POKEAT");
+        for (int i = 0; *p && i < 32; i++) {
+            unsigned int off = (unsigned int)strtoul(p, &p, 16);
+            unsigned int za = (unsigned int)strtoul(p + 1, &p, 16);
+            unsigned int v = (unsigned int)strtoul(p + 1, &p, 16);
+            if (*p == ',') p++;
+            if (pc == BASE + off && !(done >> i & 1)) {
+                done |= 1u << i;
+                mem[z80(za)] = v;
+                printf("poke $%04x = $%02x\n", za, v);
+            }
+        }
+    }
     if (pc == lev3_addr && !in_irq) { in_irq = 1; lev3_start = T(); }
     if (in_irq && rd16(pc) == 0x4e73) {             /* rte */
         unsigned int sp = m68k_get_reg(NULL, M68K_REG_SP);
@@ -326,15 +351,17 @@ int main(int argc, char **argv)
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 1; }
     if (getenv("BT_FASTMODE")) { BASE = 0x800000; fast_from = 0x800000; }
-    size_t len = fread(mem + BASE, 1, 0x400000, f);
+    /* BT_RESUME=prefix: carry on from a WinUAE save state (tools/harness/uss.py
+       writes prefix_chip.bin, prefix_fast.bin and prefix_cpu.txt; the program
+       base comes from BT_BASE) instead of booting game.bin */
+    const char *resume = getenv("BT_RESUME");
+    if (resume) BASE = (unsigned int)strtoul(getenv("BT_BASE"), NULL, 16);
+    else fread(mem + BASE, 1, 0x400000, f);
     fclose(f);
     int seconds = atoi(argv[2]);
     /* the platform code starts with lea super(pc),a5 / jsr -30(a6): fake Supervisor */
     mem[EXEC - 30] = 0x4e; mem[EXEC - 29] = 0xd5;   /* jmp (a5) */
     /* rt_header offset: from the assembler listing (tools/harness/amiga_sim.sh) */
-    unsigned int hdr = BASE + (unsigned int)strtoul(getenv("BT_RT_HEADER") ? getenv("BT_RT_HEADER") : "0", NULL, 16);
-    z80mem_off = hdr - BASE + rd32(hdr + 8);
-    vars_off = hdr - BASE + rd32(hdr + 16);
 
     mem[0] = 0; mem[1] = 0x0f; mem[2] = 0; mem[3] = 0;          /* SSP */
     mem[4] = BASE >> 24; mem[5] = BASE >> 16; mem[6] = BASE >> 8; mem[7] = BASE;
@@ -347,8 +374,6 @@ int main(int argc, char **argv)
     }
     if (getenv("BT_BLIT_CYC")) BLIT_CYC = atoi(getenv("BT_BLIT_CYC"));
     if (getenv("BT_CHIPWAIT")) chipwait = atoi(getenv("BT_CHIPWAIT"));
-    idle_lo = hdr + rd32(hdr + 24);
-    idle_hi = hdr + rd32(hdr + 28);
     if (getenv("BT_ROUTINE")) {
         char *p = getenv("BT_ROUTINE");
         rt_start = BASE + (unsigned int)strtoul(p, &p, 16);
@@ -362,6 +387,38 @@ int main(int argc, char **argv)
     m68k_set_reg(M68K_REG_A6, EXEC);
     m68k_set_reg(M68K_REG_A3, BASE > 0x10000 ? CHIPBLOCK : 0);
     m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
+    if (resume) {
+        char fn[512];
+        snprintf(fn, sizeof fn, "%s_chip.bin", resume);
+        FILE *rf = fopen(fn, "rb");
+        if (!rf || fread(mem, 1, 0x200000, rf) != 0x200000) { perror(fn); return 1; }
+        fclose(rf);
+        snprintf(fn, sizeof fn, "%s_fast.bin", resume);
+        rf = fopen(fn, "rb");
+        if (!rf) { perror(fn); return 1; }
+        fread(mem + 0x200000, 1, 0x800000, rf);
+        fclose(rf);
+        snprintf(fn, sizeof fn, "%s_cpu.txt", resume);
+        rf = fopen(fn, "r");
+        if (!rf) { perror(fn); return 1; }
+        static const int regs[] = { M68K_REG_D0, M68K_REG_D1, M68K_REG_D2, M68K_REG_D3, M68K_REG_D4,
+            M68K_REG_D5, M68K_REG_D6, M68K_REG_D7, M68K_REG_A0, M68K_REG_A1, M68K_REG_A2, M68K_REG_A3,
+            M68K_REG_A4, M68K_REG_A5, M68K_REG_A6, M68K_REG_PC, M68K_REG_SR, M68K_REG_USP,
+            M68K_REG_ISP, M68K_REG_MSP, M68K_REG_VBR };   /* (the file's order) */
+        for (unsigned int i = 0; i < sizeof regs / sizeof regs[0]; i++) {
+            unsigned int v;
+            if (fscanf(rf, "%x", &v) != 1) { fprintf(stderr, "%s: short\n", fn); return 1; }
+            m68k_set_reg(regs[i], v);
+        }
+        fclose(rf);
+        FRAME = 262ULL * 227 * 4;               /* the game's default, NTSC */
+        next_vbl = FRAME;
+    }
+    unsigned int hdr = BASE + (unsigned int)strtoul(getenv("BT_RT_HEADER") ? getenv("BT_RT_HEADER") : "0", NULL, 16);
+    z80mem_off = hdr - BASE + rd32(hdr + 8);
+    vars_off = hdr - BASE + rd32(hdr + 16);
+    idle_lo = hdr + rd32(hdr + 24);
+    idle_hi = hdr + rd32(hdr + 28);
 
     unsigned long long next = FRAME;
     int frame = 0, dumpi = 3;
@@ -374,9 +431,24 @@ int main(int argc, char **argv)
             vbl_due = 0;
             next_vbl += FRAME;
             frame++;
+            sim_frame = frame;
             unsigned int e003 = mem[z80(0xe003)];
             z80_frames += (e003 - last_e003) & 0xff;
             last_e003 = e003;
+            if (getenv("BT_RANDJOY")) {
+                static unsigned int seed, hold;
+                if (!seed) seed = (unsigned int)atoi(getenv("BT_RANDJOY")) * 2654435761u | 1;
+                if (!hold) {
+                    seed = seed * 1103515245u + 12345;
+                    unsigned int r = seed >> 16;
+                    int h = r % 3, v = (r / 3) % 3;   /* left/none/right, up/none/down */
+                    int right = h == 2, left = h == 0, down = v == 2, up = v == 0;
+                    joy1dat = (right << 1 | (right ^ down)) | (left << 1 | (left ^ up)) << 8;
+                    joyfire = (r >> 4 & 3) != 0;
+                    hold = 4 + (r >> 8 & 31);
+                }
+                hold--;
+            }
             /* BT_KEYS="frame:key,frame:-key,...": Amiga raw key codes (hex) pressed/released */
             if (getenv("BT_KEYS") && getenv("BT_PVKEYS")) {
                 unsigned int keys = BASE + (unsigned int)strtoul(getenv("BT_PVKEYS"), NULL, 16);
