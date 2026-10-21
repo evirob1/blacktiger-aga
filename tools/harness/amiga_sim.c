@@ -420,6 +420,16 @@ void harness_hook(unsigned int pc)
             }
         }
     }
+    /* BT_SPRFORCE=x0,dx,y,code,attr: sprite 127 of each frame drawn put there
+       (x moving dx a frame; BT_SNAPPED, BT_SPRSNAP: offsets from the listing) */
+    if (getenv("BT_SPRFORCE") && getenv("BT_SNAPPED") && pc == BASE + (unsigned int)strtoul(getenv("BT_SNAPPED"), NULL, 16)) {
+        int x0, dx, y, code, attr;
+        if (sscanf(getenv("BT_SPRFORCE"), "%i,%i,%i,%i,%i", &x0, &dx, &y, &code, &attr) == 5) {
+            unsigned int e = BASE + (unsigned int)strtoul(getenv("BT_SPRSNAP"), NULL, 16) + 127 * 4;
+            int x = x0 + dx * sim_frame;
+            mem[e] = code; mem[e + 1] = attr | (x & 256 ? 0x10 : 0); mem[e + 2] = y; mem[e + 3] = x;
+        }
+    }
     if (pc == lev3_addr && !in_irq) { in_irq = 1; lev3_start = T(); }
     if (in_irq && rd16(pc) == 0x4e73) {             /* rte */
         unsigned int sp = m68k_get_reg(NULL, M68K_REG_SP);
@@ -632,6 +642,27 @@ int main(int argc, char **argv)
                     hold = 4 + (r >> 8 & 31);
                 }
                 hold--;
+            }
+            /* BT_BGPOKE=frame:offset:code:attr,...: background RAM cells set at
+               that frame (offset in the 16K, hex), their groups marked changed
+               for good (BT_BGRAM, BT_GRPGEN: from the listing) - test scenery */
+            if (getenv("BT_BGPOKE") && getenv("BT_BGRAM") && getenv("BT_GRPGEN")) {
+                unsigned int bgram = BASE + (unsigned int)strtoul(getenv("BT_BGRAM"), NULL, 16);
+                unsigned int grp = BASE + (unsigned int)strtoul(getenv("BT_GRPGEN"), NULL, 16);
+                char *p = getenv("BT_BGPOKE");
+                while (*p) {
+                    int f = (int)strtol(p, &p, 10);
+                    unsigned int off = (unsigned int)strtoul(p + 1, &p, 16);
+                    unsigned int code = (unsigned int)strtoul(p + 1, &p, 16);
+                    unsigned int attr = (unsigned int)strtoul(p + 1, &p, 16);
+                    if (*p == ',') p++;
+                    if (frame >= f) {
+                        mem[bgram + off] = code;
+                        mem[bgram + off + 1] = attr;
+                        unsigned int g = grp + (off >> 5) * 4;
+                        mem[g] = 0xff; mem[g + 1] = 0xff; mem[g + 2] = 0xff; mem[g + 3] = 0xf0;
+                    }
+                }
             }
             /* BT_KEYS="frame:key,frame:-key,...": Amiga raw key codes (hex) pressed/released */
             if (getenv("BT_KEYS") && getenv("BT_PVKEYS")) {

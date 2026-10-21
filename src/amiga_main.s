@@ -23,7 +23,7 @@
 ;      palette     16 colour slots of 16 (one AGA colour bank each): the arcade
 ;                  palettes on screen (background 0-15, sprites 16-23) get a
 ;                  slot each, slots 14 and 15 are the text layer's
-;    Not yet: background priority (tiles in front of sprites), sound.
+;      priority    scenery in front of sprites: front_cells
 ;
 ; Controls: joystick in port 2 - fire attacks, second button (or Space) jumps.
 ;           Keyboard: 5 = coin, 1 = 1 player start, 2 = 2 players.
@@ -117,6 +117,7 @@ REC_SHIFT	equ	6			; w  shift << 12
 REC_MASK	equ	8			; l  mask (16 words)
 REC_DATA	equ	12			; l  planes 0-3 (16 words each)
 REC_SLOT	equ	16			; w  colour slot
+REC_COL		equ	18			; w  memory column * 2 (its first word)
 SAVESIZE	equ	27*1024			; background saved under the sprites, per buffer
 SAVE_ROW	equ	NPLANES*4		; ... per line of a sprite
 NBUF		equ	3			; display buffers: shown, queued, being drawn
@@ -200,6 +201,7 @@ pv_blank	rs.w	16			; unused slot: black, pen 15 backdrop
 pv_keys		rs.b	128
 pv_sprbuf	rs.b	4*NSPR			; sprite RAM, buffered on out ($06)
 pv_sprsnap	rs.b	4*NSPR			; the copy being drawn
+pv_fmark	rs.b	16*NCOLSLOT		; front_cells: cells done this frame
 pv_size		rs.b	0
 
 ;------------------------------------------------------------------------------
@@ -1009,6 +1011,7 @@ draw_frame:
 	moveq	#NSPR-1,d0
 .sn	move.l	(a0)+,(a2)+
 	dbf	d0,.sn
+draw_snapped:				; (tools/harness/amiga_sim.c: BT_SPRFORCE)
 	move.l	pv_io(a4),pv_iod(a4)
 	move.l	pv_io+4(a4),pv_iod+4(a4)
 	move.l	pv_io+8(a4),pv_iod+8(a4)
@@ -1867,36 +1870,12 @@ mshoff:		ds.w	160
 ; attribute: bit 7 x flip, bits 6-3 colour, bits 2-0 code bits 8-10
 draw_tile:
 	movem.l	d0-d4/a0/a2/a3,-(sp)
-	move.l	a0,d4
 	tst.l	d0
 	bmi	.blank
 	moveq	#0,d1
 	move.b	d0,d1			; attribute
-	lsr.w	#8,d0
-	moveq	#7,d2
-	and.b	d1,d2
-	lsl.w	#8,d2
-	or.w	d2,d0			; tile number
-	and.l	#$7ff,d0
-	lsl.l	#7,d0
-	CHIPB	CB_BGTILES,a2
-	add.l	d0,a2
-	tst.b	d1
-	bpl.s	.noflip
-	bsr	blit_wait		; the blitter may still read the last flipped tile
-	CHIPA	CA_FLIPTILE,a3
-	lea	rev_table(pc),a0
-	moveq	#63,d2
-.fl	moveq	#0,d0
-	move.b	(a2)+,d0
-	move.b	(a0,d0.w),d3
-	move.b	(a2)+,d0
-	move.b	(a0,d0.w),(a3)+
-	move.b	d3,(a3)+
-	dbf	d2,.fl
-	CHIPA	CA_FLIPTILE,a2
-	move.l	d4,a0
-.noflip	moveq	#3,d2			; pen planes 0-3 from the tile
+	bsr	tile_src
+	moveq	#3,d2			; pen planes 0-3 from the tile
 .p	bsr	blit_wait
 	move.w	#$09f0,BLTCON0(a6)
 	move.l	a2,BLTAPT(a6)
@@ -1935,6 +1914,38 @@ draw_tile:
 	add.l	#PLANEALLOC,a0
 	dbf	d2,.bl
 	bra.s	.x
+
+; d0.w = tile word (code << 8 | attribute) -> a2 = its 4 pen planes (x
+; flipped if the attribute says so: a copy). Keeps the other registers.
+tile_src:
+	movem.l	d0-d3/a0/a3,-(sp)
+	moveq	#0,d1
+	move.b	d0,d1			; attribute
+	lsr.w	#8,d0
+	moveq	#7,d2
+	and.b	d1,d2
+	lsl.w	#8,d2
+	or.w	d2,d0			; tile number
+	and.l	#$7ff,d0
+	lsl.l	#7,d0
+	CHIPB	CB_BGTILES,a2
+	add.l	d0,a2
+	tst.b	d1
+	bpl.s	.x
+	bsr	blit_wait		; the blitter may still read the last flipped tile
+	CHIPA	CA_FLIPTILE,a3
+	lea	rev_table(pc),a0
+	moveq	#63,d2
+.fl	moveq	#0,d0
+	move.b	(a2)+,d0
+	move.b	(a0,d0.w),d3
+	move.b	(a2)+,d0
+	move.b	(a0,d0.w),(a3)+
+	move.b	d3,(a3)+
+	dbf	d2,.fl
+	CHIPA	CA_FLIPTILE,a2
+.x	movem.l	(sp)+,d0-d3/a0/a3
+	rts
 
 ;------------------------------------------------------------------------------
 ; sprites as blitter objects. Each frame: put back the background saved under
@@ -2237,7 +2248,7 @@ draw_bobs:
 	move.l	a0,(a2)+		; REC_MASK
 	move.l	a1,(a2)+		; REC_DATA
 	move.w	d3,(a2)+		; REC_SLOT
-	addq.l	#2,a2
+	move.w	d2,(a2)+		; REC_COL
 	addq.w	#1,d7
 	cmp.w	d0,d1
 	beq.s	.next
@@ -2254,7 +2265,7 @@ draw_bobs:
 	move.l	a0,(a2)+
 	move.l	a1,(a2)+
 	move.w	d3,(a2)+
-	addq.l	#2,a2
+	move.w	d2,(a2)+
 	addq.w	#1,d7
 .next	cmp.w	#2*MAXBOB-1,d7		; (room for MAXBOB sprites)
 	dbhs	d6,.spr
@@ -2270,7 +2281,131 @@ draw_bobs:
 	bne.s	.ns
 	bsr	save_bobs
 .ns	bsr	blit_bobs
+	bsr	front_cells
 .x	rts
+
+; Scenery in front of the sprites: the cells of background palettes 0-5
+; have pens drawn over them (as MAME has it: pens 0-11 for palettes 0 and 1,
+; 0-7 for 2 and 3, 0-3 for 4 and 5). Every such cell an object covers gets
+; those pixels drawn again on top (d7 objects).
+front_cells:
+	lea	pv_fmark(a4),a0
+	move.w	#16*NCOLSLOT/4-1,d0
+.cl	clr.l	(a0)+
+	dbf	d0,.cl
+	move.l	pv_rec(a4),a2
+	move.w	d7,d5
+	subq.w	#1,d5
+.r	moveq	#0,d0
+	move.w	REC_COL(a2),d0		; 2 * memory column
+	move.l	REC_DEST(a2),d1
+	sub.l	pv_bm(a4),d1
+	sub.l	d0,d1
+	divu.w	#LINEB,d1		; first line
+	move.w	d1,d2
+	add.w	REC_H(a2),d2
+	subq.w	#1,d2
+	lsr.w	#4,d1			; buffer slots d1 .. d2
+	lsr.w	#4,d2
+	lsr.w	#1,d0			; memory column
+.row	bsr.s	front_cell
+	tst.w	REC_SHIFT(a2)		; (shifted: over the next column too)
+	beq.s	.nc
+	addq.w	#1,d0
+	bsr.s	front_cell
+	subq.w	#1,d0
+.nc	addq.w	#1,d1
+	cmp.w	d2,d1
+	bls.s	.row
+	lea	REC_SIZE(a2),a2
+	dbf	d5,.r
+	rts
+
+; d1 = buffer slot, d0 = memory column: the cell's front pixels, once a frame
+front_cell:
+	movem.l	d0-d4/a0-a3,-(sp)
+	moveq	#0,d2
+	move.w	d0,d2
+	divu.w	#NCOLSLOT,d2
+	swap	d2			; column slot
+	move.w	d1,d3
+	mulu.w	#NCOLSLOT,d3
+	add.w	d2,d3			; the cell
+	lea	pv_fmark(a4),a0
+	tst.b	(a0,d3.w)
+	bne	.x
+	st	(a0,d3.w)
+	move.l	pv_sh(a4),a0
+	move.l	(a0,d3.w*4),d4		; what the buffer holds there
+	bmi	.x			; (nothing known, or blank)
+	swap	d4
+	cmp.b	d0,d4			; this memory column?
+	bne	.x
+	swap	d4
+	moveq	#$78,d2			; its palette: 0-5?
+	and.b	d4,d2
+	lsr.b	#3,d2
+	cmp.b	#6,d2
+	bhs	.x
+	moveq	#0,d3
+	move.b	pv_slot_of(a4,d2.w),d3	; (its colour slot)
+	bmi	.x
+	move.b	front_min(pc,d2.w),d2
+	move.l	pv_bm(a4),a1		; the cell in the buffer
+	mulu.w	#16*LINEB,d1
+	add.l	d1,a1
+	add.w	d0,a1
+	add.w	d0,a1
+	move.l	d4,d0
+	bsr	tile_src		; -> a2
+	bsr	blit_wait
+	clr.w	BLTCON1(a6)
+	move.l	#-1,BLTAFWM(a6)
+	clr.l	BLTBMOD(a6)		; (B, A)
+	clr.w	BLTDMOD(a6)
+	or.w	#$0d00,d2		; the mask from pen bits 3 (A) and 2 (B)
+	move.w	d2,BLTCON0(a6)
+	lea	96(a2),a0
+	move.l	a0,BLTAPT(a6)
+	lea	64(a2),a0
+	move.l	a0,BLTBPT(a6)
+	CHIPA	CA_FRONT,a3
+	move.l	a3,BLTDPT(a6)
+	move.w	#(16<<6)|1,BLTSIZE(a6)
+	bsr	blit_wait
+	clr.w	BLTAMOD(a6)
+	move.w	#LINEB-2,BLTCMOD(a6)
+	move.w	#LINEB-2,BLTDMOD(a6)
+	move.w	#$0fca,BLTCON0(a6)	; pen planes: D = A.B + !A.C
+	moveq	#3,d2
+.p	bsr	blit_wait
+	move.l	a3,BLTAPT(a6)
+	move.l	a2,BLTBPT(a6)
+	move.l	a1,BLTCPT(a6)
+	move.l	a1,BLTDPT(a6)
+	move.w	#(16<<6)|1,BLTSIZE(a6)
+	lea	32(a2),a2
+	add.l	#PLANEALLOC,a1
+	dbf	d2,.p
+	moveq	#3,d2			; slot planes: D = A + C, or !A.C
+.k	move.w	#$0b0a,d0
+	lsr.b	#1,d3
+	bcc.s	.z
+	move.w	#$0bfa,d0
+.z	bsr	blit_wait
+	move.w	d0,BLTCON0(a6)
+	move.l	a3,BLTAPT(a6)
+	move.l	a1,BLTCPT(a6)
+	move.l	a1,BLTDPT(a6)
+	move.w	#(16<<6)|1,BLTSIZE(a6)
+	add.l	#PLANEALLOC,a1
+	dbf	d2,.k
+.x	movem.l	(sp)+,d0-d4/a0-a3
+	rts
+; per palette 0-5: the mask's minterm (A = pen bit 3, B = pen bit 2): pens
+; 0-11 = !(A.B), 0-7 = !A, 0-3 = !A.!B
+front_min:	dc.b	$3f,$3f,$0f,$0f,$03,$03
+	even
 
 ; d4 = sprite number * 32, a1 = sprite, a0 = its mask -> a1, a0 = x-flipped
 ; copies: from the cache of recently flipped sprites (64, by sprite number),
@@ -2799,7 +2934,8 @@ CA_NULLSPR	equ	CA_TXSPR+8*TXSPR_SIZE
 CA_FLIPBUF	equ	CA_NULLSPR+32
 CA_FLIPCACHE	equ	CA_FLIPBUF+MAXBOB*160	; 64 x 160
 CA_FLIPTILE	equ	CA_FLIPCACHE+64*160
-CA_SAVE0	equ	CA_FLIPTILE+128		; NBUF save areas
+CA_FRONT	equ	CA_FLIPTILE+128		; front_cells: a cell's front pixels
+CA_SAVE0	equ	CA_FRONT+32		; NBUF save areas
 CHIPA_SIZE	equ	CA_SAVE0+NBUF*SAVESIZE
 	ifgt	CHIPA_SIZE-(packed_end-z80rom)	; (the rest of their room: here, after
 	ds.b	CHIPA_SIZE-(packed_end-z80rom)	; the packed data - nothing between)

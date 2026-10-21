@@ -17,7 +17,7 @@ set). Please don't distribute the built disk images.
 | Main game code: Z80 → 68020 translator and runtime | working: 3,000 frames of attract mode and play match MAME byte for byte (see [docs/TRANSLATOR.md](docs/TRANSLATOR.md)) |
 | Translated game on the A1200: background, sprites, text layer, palette, joystick, keyboard | working (`build/blacktiger.adf`): game logic at full speed; the display drops to 25 fps on busy screens |
 | Game sprites (player, enemies, shots) | done: blitter objects, double buffered; matches a MAME-style reference render |
-| Background priority (scenery in front of sprites) | next |
+| Background priority (scenery in front of sprites) | done: the front pens of background palettes 0-5 redrawn over the objects (MAME's split table) |
 | Code coverage of later levels | in progress: code the recordings never reached stops with a red screen |
 | Sound | the arcade's sound program translated (its YM2203 register writes match MAME exactly), played through a software mixer of sampled FM instruments and SSG tones, or (68040 / 68060) the chips synthesised in real time; effects as samples on a stock A1200 |
 | WHDLoad/HD install | planned |

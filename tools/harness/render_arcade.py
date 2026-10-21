@@ -4,8 +4,8 @@ and the view position and sprite list the Amiga display last drew. A
 reference for tools/harness/render_frame.py; with a third argument, compares
 the two and writes a difference image.
 
-The background is drawn in one layer (the "front" pens over sprites aren't
-emulated on the Amiga yet, so they aren't here either).
+The background's "front" pens (palettes 0-5: pens 0-11, 0-7 or 0-3, as
+MAME's split table) are drawn again over the sprites.
 
 usage: python3 tools/harness/render_arcade.py build/amiga_mem_N.bin ref.png [amiga.png diff.png]
 """
@@ -59,6 +59,8 @@ def main():
     px = img.load()
     bgon, objon, chon = not io(0x0C) & 2, not io(0x0C) & 4, not io(4) & 0x80
 
+    front = []                                  # (x, y, colour) drawn over the sprites
+    limit = [12, 12, 8, 8, 4, 4] + [0] * 10
     if bgon:
         for y in range(H):
             my = (sy0 + y) & (mh - 1)
@@ -78,6 +80,8 @@ def main():
                 pen = t[ty * 16 + tx]
                 if pen != 15:
                     px[x, y] = rgb(((attr >> 3) & 15) * 16 + pen)
+                    if pen < limit[(attr >> 3) & 15]:
+                        front.append((x, y, ((attr >> 3) & 15) * 16 + pen))
 
     if objon:
         spr = [pvb("pv_sprsnap", i) for i in range(512)]
@@ -99,6 +103,8 @@ def main():
                     pen = t[yy * 16 + (15 - xx if attr & 8 else xx)]
                     if pen != 15:
                         px[x, y] = rgb(0x200 + col * 16 + pen)
+    for x, y, c in (front if not os.environ.get("BT_NOFRONT") else []):
+        px[x, y] = rgb(c)
 
     if chon:
         for row in range(2, 30):

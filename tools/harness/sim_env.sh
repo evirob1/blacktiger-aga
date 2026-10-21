@@ -23,3 +23,6 @@ if [ -f build/game/fx_bank.bin.at ]; then
   read FX_AT < build/game/fx_bank.bin.at
   export BT_FX=build/game/fx_bank.bin,$FX_AT
 fi
+SN=$(sym draw_snapped); [ -n "$SN" ] && export BT_SNAPPED=$SN
+PS=$(sym pv_sprsnap); [ -n "$PS" ] && export BT_SPRSNAP=$(printf "%x" $((0x$PV + 0x$PS)))
+export BT_BGRAM=$(sym bgram) BT_GRPGEN=$(sym grpgen)
