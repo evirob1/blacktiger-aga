@@ -63,9 +63,11 @@ and the sound output stay in chip RAM, which makes the busy scenes noticeably
 smoother. The same disk does both, automatically.
 
 Sound costs CPU time: the arcade's sound program runs about 500 times a
-second, and its 12 voices are mixed in software. On a stock A1200 that is
-nearly half of the CPU, so the display drops frames more often than without
-(the game itself still runs at full speed); with fast RAM about a third.
+second, and its 12 voices are mixed in software. So on a stock A1200 the game
+plays the sound effects only (about a fifth of the CPU); with fast RAM, music
+and effects (about a third). **F9** switches the music on or off either way
+(off silences the tune playing; on starts with the next tune the game plays).
+The game itself always runs at full speed: sound costs display frames.
 
 The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
 arcade's own frame rate: the game runs at the original speed. That needs a
@@ -78,10 +80,12 @@ or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
 currently always appear on top).
 
 Level select (for testing): **F1**-**F8** before starting a game makes it
-start at that level (1-8), with the equipment you start the game with.
+start at the beginning of that level (1-8), with the equipment you start the
+game with.
 
-Test mode: the **Help** key switches it on and off (the power LED dims while
-it is on). Hits then do no damage, and lives and time never go down - handy
+Test mode: the **Help** key switches it on and off (nothing shows it: the
+power LED would, but on an A1200 its switch also turns the audio filter off).
+Hits then do no damage, and lives and time never go down - handy
 for exploring. (Falling into a pit still costs the life you're on, so you
 restart at the last checkpoint, but the game doesn't end.)
 

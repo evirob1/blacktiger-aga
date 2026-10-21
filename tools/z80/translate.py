@@ -36,9 +36,9 @@ RUNTIME_LABELS = {0x00B3, 0x0116}
 # `ld c,(ix+15)`: the damage a hit does to the armour ($F3AD), just before
 # it is taken off; PLAT_HIT may change it (test mode: none)
 HIT_SITE = (None, 0x2F49)
-# a player's turn starts (the player's record copied to $F3A0, iy = it): the
+# a game starts: the level ($F3A1) sets where the player starts; the
 # platform's level select, PLAT_LEVEL
-LEVEL_SITE = (None, 0x2269)
+LEVEL_SITE = (None, 0x1E77)
 
 
 def excluded(key):
@@ -538,7 +538,7 @@ class Translator:
                 if key == HIT_SITE and not self.sound:     # the damage of a hit, in c: the platform's test mode
                     trs[key].lines.append("PLAT_HIT")
                     trs[key].clob |= CCR_MOVE
-                if key == LEVEL_SITE and not self.sound:   # a turn starts: the platform's level select
+                if key == LEVEL_SITE and not self.sound:   # a game starts: the platform's level select
                     trs[key].lines.insert(0, "PLAT_LEVEL")
                     trs[key].clob |= CCR_MOVE
         daa_keys = set(fused.values())

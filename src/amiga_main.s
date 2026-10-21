@@ -171,6 +171,8 @@ pv_cheat	rs.b	1			; test mode (Help key): no damage, lives, time
 pv_helpkey	rs.b	1			; Help key held last frame
 pv_clives	rs.b	1			; test mode: lives kept at least at this
 pv_level	rs.b	1			; F1-F8: start the next game at level 1-8 (0: as usual)
+pv_f9key	rs.b	1			; F9 held last frame
+		rs.b	1
 pv_ctime	rs.w	1			; time (minutes << 8 | seconds, BCD)
 pv_ctick	rs.w	1			; frames since the time last changed
 pv_usedacc	rs.l	1			; background palettes on screen
@@ -211,6 +213,9 @@ super:
 	lea	snd_on(pc),a0		; or 0: no room for sound
 	move.l	a2,d0
 	sne	(a0)
+	lea	snd_nomusic(pc),a0	; no fast RAM: sound effects only (F9: music
+	move.l	a3,d0			; too)
+	seq	(a0)
 	lea	chipa(pc),a0		; a3 (bootblock): separate chip RAM block, or 0
 	move.l	a3,d0
 	bne.s	.fast
@@ -234,6 +239,7 @@ super:
 	move.l	a1,$68(a0)
 	lea	lev3(pc),a1
 	move.l	a1,$6c(a0)
+	bclr	#1,CIAA_PRA		; the audio filter on (the power LED bright)
 	move.b	#$7f,CIAA_ICR		; keyboard: CIA-A serial port interrupt only
 	tst.b	CIAA_ICR
 	move.b	#$88,CIAA_ICR
@@ -302,17 +308,17 @@ PLAT_HIT macro				; test mode: a hit does no damage (c)
 .nohit\@
 	endm
 
-PLAT_LEVEL macro			; a player's turn starts ($2269, iy = the
-	tst.b	(pvars+pv_level,pc)	; player's record, copied to $F3A0): the
-	beq.s	.nolevel\@		; level chosen with F1-F8, for the first
-	move.l	a0,-(sp)		; (flags: none live here)
-	lea	pvars+pv_level(pc),a0
-	move.b	(a0),-(sp)
+PLAT_LEVEL macro			; a game starts ($1E77, about to read the
+	tst.b	(pvars+pv_level,pc)	; level for where the player starts): the
+	beq.s	.nolevel\@		; level chosen with F1-F8, for this game,
+	move.l	a0,-(sp)		; both players (their records, $F3C0 /
+	lea	pvars+pv_level(pc),a0	; $F3E0, are copied to $F3A0 each turn)
+	move.b	(a0),d7			; (flags: none live here)
 	clr.b	(a0)
-	move.b	(sp)+,d7
 	subq.b	#1,d7
 	move.b	d7,(ZF3A1,a6)
-	move.b	d7,(1,a6,d5.w)
+	move.b	d7,(ZF3C1,a6)
+	move.b	d7,(ZF3E1,a6)
 	move.l	(sp)+,a0
 .nolevel\@
 	endm
@@ -369,7 +375,13 @@ plat_out:
 	move.b	d0,pv_io(a0,d7.w)
 	tst.w	d7
 	bne.s	.n0
-	lea	snd_latch(pc),a0	; port 0: a command for the sound board
+	tst.b	snd_nomusic(pc)		; port 0: a command for the sound board
+	beq.s	.cmd			; (music off: its commands, $21-$37, left
+	cmp.b	#$21,d0			; out)
+	blo.s	.cmd
+	cmp.b	#$37,d0
+	bls.s	.x
+.cmd	lea	snd_latch(pc),a0
 	move.b	d0,(a0)
 	bra.s	.x
 .n0	cmp.w	#4,d7
@@ -1016,17 +1028,36 @@ read_inputs:
 	rts
 
 ;------------------------------------------------------------------------------
-; Test mode, toggled with the Help key (the power LED dims while it is on):
+; Test mode, toggled with the Help key (not shown: the power LED's bit is
+; also the audio filter's, which stays on):
 ; hits do no damage (PLAT_HIT, at the one place the game takes a hit off the
 ; armour, $F3AD: holding that value up instead fought the game's own changes
 ; to it), and lives and time never go down. Black Tiger's RAM:
 	Z80	ZF3A0,$f3a0		; lives
 	Z80	ZF3A1,$f3a1		; level (0-7)
+	Z80	ZF3C1,$f3c1		; (player 1's record)
+	Z80	ZF3E1,$f3e1		; (player 2's)
 	Z80	ZF3B1,$f3b1		; time: seconds, BCD
 	Z80	ZF3B2,$f3b2		; minutes
 test_mode:
 	lea	z80mem+$8000(pc),a0
-	moveq	#8-1,d0			; F1-F8: the level the next game starts at
+	tst.b	pv_keys+$58(a4)		; F9: music on / off (on press)
+	sne	d0
+	move.b	pv_f9key(a4),d1
+	move.b	d0,pv_f9key(a4)
+	not.b	d1
+	and.b	d1,d0
+	beq.s	.nf9
+	lea	snd_nomusic(pc),a1
+	not.b	(a1)
+	beq.s	.nf9			; on: from the next tune the game starts
+	tst.b	snd_on(pc)		; off: the sound CPU starts again, silent
+	beq.s	.nf9
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	bsr	snd_init
+	move.w	(sp)+,sr
+.nf9	moveq	#8-1,d0			; F1-F8: the level the next game starts at
 .lk	tst.b	pv_keys+$50(a4,d0.w)	; (PLAT_LEVEL)
 	beq.s	.lk2
 	move.b	d0,pv_level(a4)
@@ -1045,10 +1076,6 @@ test_mode:
 	lsl.w	#8,d0
 	move.b	(ZF3B1,a0),d0
 	move.w	d0,pv_ctime(a4)
-	bclr	#1,CIAA_PRA		; LED on (bright)
-	tst.b	pv_cheat(a4)
-	beq.s	.on
-	bset	#1,CIAA_PRA		; LED dim: test mode
 .on	tst.b	pv_cheat(a4)
 	beq.s	.x
 	move.b	(ZF3A0,a0),d0		; lives
@@ -2538,6 +2565,7 @@ bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py: BSS,
 			dc.l	CHIPB_SIZE		; chip area B,
 			dc.l	SOUND_SIZE		; its sound part)
 snd_on:			dc.b	0		; room for sound: it plays
+snd_nomusic:		dc.b	0		; music off (effects only): without fast RAM
 			even
 chipa:			dc.l	0		; chip RAM areas (see the end of the file)
 chipb:			dc.l	0

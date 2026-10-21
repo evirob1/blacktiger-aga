@@ -342,11 +342,16 @@ void harness_hook(unsigned int pc)
     if (aud_on && T() >= aud_next) {
         static unsigned int play_lc[4], play_n;
         if (wav && play_n) {
+            /* BT_WAVSOLO=c: only channel c (to see what each one plays) */
+            static int solo = -2;
+            if (solo == -2) solo = getenv("BT_WAVSOLO") ? atoi(getenv("BT_WAVSOLO")) : -1;
+            int vol[4];
+            for (int c = 0; c < 4; c++) vol[c] = solo < 0 || solo == c ? (int)aud_vol[c] : 0;
             for (unsigned int i = 0; i < play_n; i++) {
-                int l = (signed char)mem[(play_lc[0] + i) & 0xffffff] * (int)aud_vol[0] +
-                        (signed char)mem[(play_lc[3] + i) & 0xffffff] * (int)aud_vol[3];
-                int r = (signed char)mem[(play_lc[1] + i) & 0xffffff] * (int)aud_vol[1] +
-                        (signed char)mem[(play_lc[2] + i) & 0xffffff] * (int)aud_vol[2];
+                int l = (signed char)mem[(play_lc[0] + i) & 0xffffff] * vol[0] +
+                        (signed char)mem[(play_lc[3] + i) & 0xffffff] * vol[3];
+                int r = (signed char)mem[(play_lc[1] + i) & 0xffffff] * vol[1] +
+                        (signed char)mem[(play_lc[2] + i) & 0xffffff] * vol[2];
                 short o[2] = { (short)(l * 2), (short)(r * 2) };
                 fwrite(o, 2, 2, wav);
             }

@@ -462,7 +462,7 @@ vol_row:
 ;------------------------------------------------------------------------------
 ; mix the voices into the half being filled: 3 per channel
 play_mix:
-	move.l	a4,-(sp)
+	move.l	a4,-(sp)		; (a4: the player's variables)
 	move.l	PV_BUF(a4),a3
 	move.w	PV_HALF(a4),d0
 	mulu.w	#CHUNK,d0
@@ -497,9 +497,9 @@ play_mix:
 	move.l	d3,V_ROW(a0)
 .rn	lea	V_SIZE(a0),a0
 	dbf	d5,.r
-.mix	movem.l	d7/a3/a5,-(sp)
-	bsr	mix_channel
-	movem.l	(sp)+,d7/a3/a5
+.mix	movem.l	d7/a3-a5,-(sp)
+	bsr	mix_channel		; (uses every register)
+	movem.l	(sp)+,d7/a3-a5
 	lea	3*V_SIZE(a5),a5
 	lea	2*CHUNK(a3),a3
 	dbf	d7,.ch
