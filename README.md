@@ -69,7 +69,9 @@ third of the CPU. **F9** switches the music on or off (off silences the tune
 playing; on starts with the next tune the game plays). On a stock A1200 there
 is neither the room nor the time for that: the game plays the sound effects
 as samples straight on Paula's four channels instead (rendered at build time
-by ymfm, MAME's YM2203 emulation; about 2% of the CPU), and no music. The game
+by ymfm, MAME's YM2203 emulation; about 2% of the CPU), the credit jingle and
+the story page's tune, and no other music (the story tune is left out if chip
+RAM is short). The game
 itself always runs at full speed: sound costs display frames.
 
 On a 68040 or 68060 with fast RAM the two YM2203s are synthesised instead, in

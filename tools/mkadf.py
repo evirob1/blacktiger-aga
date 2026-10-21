@@ -49,7 +49,7 @@ def pack_cached(data, cache):
 
 
 def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, sound_size=0,
-          bss_end=0, fx_path=None, fx_size=0):
+          bss_end=0, fx_path=None, fx_size=0, fx_lite=0):
     """sound_path: the sound data (the sound program's ROM + the instrument
     bank), after the payload on the disk; with fast RAM the bootblock puts it
     at the end of the program's block, sound_size bytes there (its window,
@@ -67,6 +67,8 @@ def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, 
     sdisk = (len(sound) + 511) & ~511
     fx = open(fx_path, "rb").read() if fx_path else b""
     fxdisk = (len(fx) + 511) & ~511
+    fxlite = (min(fx_lite or len(fx), len(fx)) + 511) & ~511      # (short of chip RAM: without the
+                                                                 # optional effects, at the end)
     if 1024 + disk + sdisk + fxdisk > ADF_SIZE:
         raise SystemExit("too big for an ADF: %d bytes (%d over)" %
                          (1024 + disk + sdisk + fxdisk, 1024 + disk + sdisk + fxdisk - ADF_SIZE))
@@ -78,15 +80,16 @@ def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, 
     fast_at = (load + bss + 7) & ~7             # the sound data's place
     quiet = (max(load + bss, bss_end + chipb) + 7) & ~7
     fast, chip, stock = fast_at + sound_size, chipa + chipb, quiet + fxdisk
+    stock_lite = quiet + fxlite
     if sound_path and fast_at - sdisk < load:
         raise SystemExit("no room below the sound data for it packed")
     if sound_path:                              # (for tools/harness/sim_env.sh)
         open(sound_path + ".at", "w").write("%x %x\n" % (quiet + 0x4000, fast_at + 0x4000))
     if fx_path:
         open(fx_path + ".at", "w").write("%x\n" % quiet)
-    # the bootblock's last nine longs (src/boot.s)
-    boot[len(boot) - 36:len(boot)] = struct.pack(">IIIIIIIII", disk, sdisk, fast, chip, stock, quiet,
-                                                 fast_at + 0x4000, quiet, fxdisk)
+    # the bootblock's last eleven longs (src/boot.s)
+    boot[len(boot) - 44:len(boot)] = struct.pack(">IIIIIIIIIII", disk, sdisk, fast, chip, stock, quiet,
+                                                 fast_at + 0x4000, quiet, fxdisk, stock_lite, fxlite)
     block = bytearray(1024)
     block[:len(boot)] = boot
     block[4:8] = b"\0\0\0\0"
@@ -102,8 +105,9 @@ def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, 
           "(%d KB free)" % (out, len(payload), len(packed), len(sound), len(fx), bss, used * 100 // ADF_SIZE,
                             (ADF_SIZE - used) // 1024))
     if chipb and sound_path:
-        print("  memory: %d KB of chip RAM with the effects (%d KB without), or %d KB fast + %d KB chip"
-              " with all the sound" % (stock // 1024, quiet // 1024, fast // 1024, chip // 1024))
+        print("  memory: %d KB of chip RAM with the effects (%d KB without the story tune, %d KB without"
+              " any), or %d KB fast + %d KB chip with all the sound" %
+              (stock // 1024, stock_lite // 1024, quiet // 1024, fast // 1024, chip // 1024))
     elif chipb:
         print("  memory: %d KB of chip RAM, or %d KB fast + %d KB chip (no sound)" %
               (stock // 1024, fast // 1024, chip // 1024))

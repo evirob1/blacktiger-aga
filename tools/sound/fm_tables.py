@@ -47,9 +47,12 @@ def main():
     sin_tab, pow_src, inc_tab = (c_table(src, n) for n in ("sin_tab", "pow_src", "inc_tab"))
     assert len(sin_tab) == 256 and len(pow_src) == 256 and len(inc_tab) == 64
     avg = env_averages(inc_tab)
-    # an SSG channel at volume 15 = an FM channel at full (its +-8192 >> 2),
-    # as a half amplitude (the square wave +- it); about 3 dB a step
-    ssg = [0] + [round(1024 * 10 ** (-(15 - v) * 3 / 20)) for v in range(1, 16)]
+    # ymfm's SSG levels (0 to 16382 at volume 15, where an FM channel swings
+    # +-8191: the same, peak to peak), as half amplitudes in mix units (an FM
+    # channel: +-2048) - the square wave swings +- it
+    amp = [0, 32, 78, 141, 178, 222, 262, 306, 369, 441, 509, 585, 701, 836, 965, 1112,
+           1334, 1595, 1853, 2146, 2576, 3081, 3576, 4135, 5000, 6006, 7023, 8155, 9963, 11976, 14132, 16382]
+    ssg = [0] + [round(amp[2 * v + 1] * 2048 / 16382) for v in range(1, 16)]
     text = ("; the FM synthesiser's tables (tools/sound/fm_tables.py: from ymfm, BSD licence)\n" +
             words("sy_sintab", sin_tab, "a quarter sine as attenuation (4.8)") +
             words("sy_powtab", pow_src, "attenuation fraction -> volume mantissa (| $400)") +

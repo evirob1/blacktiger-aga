@@ -565,6 +565,7 @@ int main(int argc, char **argv)
     m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
     m68k_set_reg(M68K_REG_A2, snd_at);           /* (0: no room for sound) */
     m68k_set_reg(M68K_REG_D6, fx_at);
+    m68k_set_reg(M68K_REG_D5, 0x100000);         /* (the effects' bytes read: all) */
     if (adf) {                                   /* (as Exec runs a bootblock) */
         m68k_set_reg(M68K_REG_A1, IOREQ);
         m68k_set_reg(M68K_REG_A3, 0);

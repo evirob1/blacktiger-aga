@@ -210,6 +210,8 @@ super:
 	move.w	#$2700,sr
 	lea	fx_bank(pc),a0		; d6 (bootblock): the effects as samples, or 0
 	move.l	d6,(a0)
+	lea	fx_read(pc),a0		; d5: their bytes read
+	move.l	d5,(a0)
 	lea	snd_a6(pc),a0		; a2 (bootblock): the sound program's ROM and
 	move.l	a2,(a0)			; the bank, at its memory's $8000 (src/sound.s),
 	lea	snd_on(pc),a0		; or 0: no room for sound
@@ -273,6 +275,17 @@ super:
 .quiet	move.l	fx_bank(pc),d0		; without fast RAM: the effects as samples
 	beq.s	.nofx
 	move.l	d0,a1
+	move.l	fx_read(pc),d1		; (chip RAM short: the optional ones at
+	cmp.l	#FX_SIZE,d1		; the end not read - left out)
+	bhs.s	.fxa
+	moveq	#FX_COUNT-1,d1
+.fxo	cmp.l	#FX_LITE,(a1)
+	blo.s	.fxi
+	clr.l	(a1)
+.fxi	lea	FX_REC(a1),a1
+	dbf	d1,.fxo
+	move.l	d0,a1
+.fxa
 	move.l	chipb(pc),a0
 	add.l	#CB_AUDIO,a0
 	bsr	fx_init
@@ -2737,8 +2750,10 @@ bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py: BSS,
 			dc.l	CHIPA_FAST		; chip area A in fast RAM mode,
 			dc.l	CHIPB_SIZE		; chip area B,
 			dc.l	SOUND_SIZE		; its sound part,
-			dc.l	FX_SIZE			; the effects' samples)
+			dc.l	FX_SIZE			; the effects' samples,
+			dc.l	FX_LITE			; ... without the optional ones)
 fx_bank:		dc.l	0		; the effects' samples (no fast RAM), or 0
+fx_read:		dc.l	0		; ... the bytes of them read
 snd_on:			dc.b	0		; room for sound: it plays
 snd_nomusic:		dc.b	0		; music off (effects only): without fast RAM
 clean_on:		dc.b	0		; the clean background buffer (fast RAM)

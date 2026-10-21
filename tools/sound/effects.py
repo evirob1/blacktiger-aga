@@ -43,9 +43,12 @@ RATE = 3546895 / PERIOD                 # 6115 Hz
 BLOCK = 32
 FX_COUNT = 0x46                         # commands $00-$45
 FX_REC = 14
-EFFECTS = list(range(0x01, 0x1F)) + list(range(0x3A, 0x44)) + [0x45]
+EFFECTS = list(range(0x01, 0x21)) + list(range(0x3A, 0x44)) + [0x45]   # ($20: a credit)
+OPTIONAL = [0x30]                       # the story page's tune: last, left off if
+                                        # chip RAM is short (src/boot.s)
 LOOPS = {0x14: None, 0x3C: 0.25}       # go on until stopped: (fixed loop, s)
 GAP = 10.0                              # seconds each effect gets
+GAPS = {0x30: 14.0}
 FIB = [-34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21]
 TABLES = [[max(-127, min(127, round(d * 2 ** (k / 4 - 2)))) for d in FIB] for k in range(24)]
 SILENT = len(TABLES)
@@ -57,14 +60,14 @@ def render_all():
     t = UNITS
     lines = ["snd_events:", "\tdc.l\t8"]
     starts = {}
-    for c in EFFECTS:
+    for c in EFFECTS + OPTIONAL:
         lines.append("\tdc.l\t%d,$101" % t)
         lines.append("\tdc.l\t%d,$100" % (t + 200))
         ts = t + round(0.2 * UNITS)
         starts[c] = ts / UNITS
         lines.append("\tdc.l\t%d,$%02x" % (ts, c))
         lines.append("\tdc.l\t%d,$ff" % (ts + 800))
-        t += round(GAP * UNITS)
+        t += round(GAPS.get(c, GAP) * UNITS)
     lines.append("\tdc.l\t%d,$ff\n\tdc.l\t-1" % t)
     os.makedirs(sound_check.B, exist_ok=True)
     open(os.path.join(sound_check.B, "sound_events.s"), "w").write("\n".join(lines) + "\n")
@@ -77,7 +80,7 @@ def render_all():
     fm, ssg = (os.path.join(sound_check.B, n) for n in ("fx_fm.f32", "fx_ssg.f32"))
     subprocess.run([ymfm.renderer(), log, str(t / UNITS), fm, ssg], check=True)
     x = np.fromfile(fm, dtype=np.float32).astype(float) + np.fromfile(ssg, dtype=np.float32)
-    return {c: x[int(s * YM_RATE):int((s + GAP - 0.3) * YM_RATE)] for c, s in starts.items()}
+    return {c: x[int(s * YM_RATE):int((s + GAPS.get(c, GAP) - 0.3) * YM_RATE)] for c, s in starts.items()}
 
 
 def resample(x):
@@ -153,10 +156,13 @@ def main():
     cache = os.path.join(sound_check.B, "fx_raw.npz")
     deps = [os.path.join(ROOT, f) for f in ("src/sound.s", "data/sound_entries.txt", "tools/z80/translate.py",
                                             "tools/sound/ym_render.cpp")]
+    raw = None
     if os.path.exists(cache) and all(os.path.getmtime(cache) > os.path.getmtime(f) for f in deps):
         z = np.load(cache)
         raw = {int(k): z[k] for k in z.files}
-    else:
+        if set(raw) != set(EFFECTS + OPTIONAL):
+            raw = None
+    if raw is None:
         raw = render_all()
         np.savez(cache, **{str(c): x for c, x in raw.items()})
     effects = {}
@@ -187,7 +193,10 @@ def main():
     head = FX_COUNT * FX_REC
     body = bytearray()
     recs = bytearray(head)
-    for c, (s, loop, vol) in sorted(effects.items()):
+    lite = None                         # (where the optional ones start)
+    for c, (s, loop, vol) in sorted(effects.items(), key=lambda e: (e[0] in OPTIONAL, e[0])):
+        if c in OPTIONAL and lite is None:
+            lite = head + len(tables) + len(body)
         data, values, starts = encode(s)
         off = head + len(tables) + len(body)
         nblk = len(s) // BLOCK
@@ -198,10 +207,13 @@ def main():
         recs[c * FX_REC:(c + 1) * FX_REC] = struct.pack(">IHIHbB", off, nblk, loff, lblk, lv, vol)
         body += data
     blob = bytes(recs) + tables + bytes(body)
+    if lite is None:
+        lite = len(blob)
     open(out, "wb").write(blob)
     open(inc, "w").write("FX_SIZE\tequ\t%d\t\t; (tools/sound/effects.py)\nFX_TABLES\tequ\t%d\n"
-                         "FX_SILENT\tequ\t%d\nFX_COUNT\tequ\t%d\nFX_REC\tequ\t%d\nFX_PERIOD\tequ\t%d\n" %
-                         (len(blob), len(TABLES), SILENT, FX_COUNT, FX_REC, PERIOD))
+                         "FX_SILENT\tequ\t%d\nFX_COUNT\tequ\t%d\nFX_REC\tequ\t%d\nFX_PERIOD\tequ\t%d\n"
+                         "FX_LITE\tequ\t%d\t\t; (without the optional ones)\n" %
+                         (len(blob), len(TABLES), SILENT, FX_COUNT, FX_REC, PERIOD, lite))
     secs = sum(len(s) for s, _, _ in effects.values()) / RATE
     print("%s: %d effects, %.1f s at %d Hz, %d bytes" % (out, len(effects), secs, RATE, len(blob)))
 

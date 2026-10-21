@@ -29,7 +29,7 @@ SY_STEPK	equ	14698			; 4096 * (3579545 / 72) / 13855
 SY_ECLK		equ	78374			; 65536 * 49716 / 13855 / 3
 ; SSG steps (a cycle = 1 << 32): (clock / 32 / period) / 13855, << 28
 SY_SSGK		equ	2167400000		; (3579545 / 32) / 13855 * (1 << 28)
-SY_GAIN		equ	13763			; the mix -> 16 bits (<< 12): as fm_lite.c's, -3 dB
+SY_GAIN		equ	9744			; the mix -> 16 bits (<< 12): MAME's level, -3 dB
 SY_SUB		equ	36			; samples at most between envelope steps
 
 	rsreset				; an operator

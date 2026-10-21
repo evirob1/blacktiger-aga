@@ -7,12 +7,13 @@
 ; form just below. Where the packed data was is zeroed again, as allocated.
 ; Then the payload starts with A6 = ExecBase, A3 = a separate chip RAM block
 ; or 0, A2 = the sound data (its ROM, after a 16K window) or 0, D6 = the
-; effects' samples or 0:
+; effects' samples or 0, D5 = how many of their bytes were read:
 ;  * fast RAM: the payload, its BSS and the sound data go into fast RAM, the
 ;    display's chip RAM areas into a chip RAM block of their own (A3)
 ;  * otherwise everything goes into one chip RAM block (A3 = 0), with the
 ;    effects' samples at its end instead of the sound data; if that won't
-;    fit, one without them (the game runs silent)
+;    fit, without the optional ones at their end (the story tune), else
+;    without any (the game runs silent)
 ; Sizes and offsets are patched in by tools/mkadf.py.
 
 	section	boot,code
@@ -48,8 +49,15 @@
 	move.l	#$10002,d1
 	jsr	-198(a6)
 	tst.l	d0
+	bne.s	.st
+	move.l	stock_lite(pc),d0	; short: without the optional effects (the
+	move.l	#$10002,d1		; last of them)
+	jsr	-198(a6)
+	tst.l	d0
 	beq.s	.quiet
-	move.l	d0,a4
+	lea	fx_load(pc),a0
+	move.l	fx_lite(pc),(a0)
+.st	move.l	d0,a4
 	sub.l	a2,a2			; the effects at the end of the block, the
 	move.l	a4,d6			; payload's packed data below them
 	add.l	fx_at_stock(pc),d6
@@ -110,6 +118,7 @@
 	clr.l	36(a1)			; off
 	jsr	-456(a6)
 	jsr	-636(a6)		; CacheClearU: the code was written as data
+	move.l	fx_load(pc),d5		; (the effects' bytes read)
 	jmp	(a4)
 .fail	move.w	#$f00,$dff180
 	bra.s	.fail
@@ -169,3 +178,5 @@ stock_quiet	dc.l	0		; patched: the same without the sound data
 snd_at_fast	dc.l	0		; patched: the sound ROM's place in the fast block
 fx_at_stock	dc.l	0		; patched: the effects' place in the one block
 fx_load		dc.l	0		; patched: the effects, rounded to 512 (0: none)
+stock_lite	dc.l	0		; patched: stock_size without the optional effects
+fx_lite		dc.l	0		; patched: fx_load without them

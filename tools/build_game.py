@@ -100,7 +100,7 @@ def main():
         print("  (they need g++ and git on the PATH too)")
         open(os.path.join(out, "fx_bank.i"), "w").write(
             "FX_SIZE\tequ\t0\nFX_TABLES\tequ\t0\nFX_SILENT\tequ\t0\nFX_COUNT\tequ\t0\n"
-            "FX_REC\tequ\t14\nFX_PERIOD\tequ\t580\n")
+            "FX_REC\tequ\t14\nFX_PERIOD\tequ\t580\nFX_LITE\tequ\t0\n")
         fx = None
 
     boot = os.path.join(ROOT, "build", "boot.bin")
@@ -111,10 +111,10 @@ def main():
                    incdir=out, extra=["-I" + os.path.join(ROOT, "src"), "-L", lst] + (["-DPAL=1"] if a.pal else []))
     at = listing_symbol(lst, "bss_size")
     data = open(payload, "rb").read()
-    bss, chipa, chipb, sound_size, fx_size = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big")
-                                              for i in range(5))
+    bss, chipa, chipb, sound_size, fx_size, fx_lite = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big")
+                                                       for i in range(6))
     mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"), chipa, chipb,
-                sound, sound_size, listing_symbol(lst, "bss_end"), fx, fx_size)
+                sound, sound_size, listing_symbol(lst, "bss_end"), fx, fx_size, fx_lite)
 
 
 if __name__ == "__main__":
