@@ -31,10 +31,11 @@ See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and th
 You need:
 
 * **Python 3**: the build uses only the standard library, except for sound.
-* For sound: **numpy** (`pip install numpy`), **gcc** and **git**. The build
-  makes the sound program's instrument samples by running it on a 68k emulator
-  (Musashi, fetched with git and compiled with gcc). Without them you get a
-  silent disk.
+* For sound: **numpy** (`pip install numpy`), **gcc**, **g++** and **git**.
+  The build runs the sound program on a 68k emulator (Musashi, fetched with git
+  and compiled with gcc) for its instrument samples, and renders the sound
+  effects with ymfm (fetched with git, compiled with g++). Without them you get
+  a silent disk.
 * **vasm** (`vasmm68k_mot`): either on your PATH or set `VASM` to its full path.
   Windows binaries: http://sun.hasenbraten.de/vasm/ (Motorola syntax, m68k).
 
@@ -62,12 +63,14 @@ program, the arcade's memory and the sound data go there and only the graphics
 and the sound output stay in chip RAM, which makes the busy scenes noticeably
 smoother. The same disk does both, automatically.
 
-Sound costs CPU time: the arcade's sound program runs about 500 times a
-second, and its 12 voices are mixed in software. So on a stock A1200 the game
-plays the sound effects only (about a fifth of the CPU); with fast RAM, music
-and effects (about a third). **F9** switches the music on or off either way
-(off silences the tune playing; on starts with the next tune the game plays).
-The game itself always runs at full speed: sound costs display frames.
+Sound: with fast RAM, the arcade's sound program runs (about 500 times a
+second) and its 12 voices are mixed in software - music and effects, about a
+third of the CPU. **F9** switches the music on or off (off silences the tune
+playing; on starts with the next tune the game plays). On a stock A1200 there
+is neither the room nor the time for that: the game plays the sound effects
+as samples straight on Paula's four channels instead (rendered at build time
+by ymfm, MAME's YM2203 emulation; about 2% of the CPU), and no music. The game
+itself always runs at full speed: sound costs display frames.
 
 The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
 arcade's own frame rate: the game runs at the original speed. That needs a
@@ -107,7 +110,8 @@ it happened.
 src/boot.s            bootblock: loads the program and the sound data
 src/sound.s           the arcade's sound CPU: its translated program's runtime, YM2203 registers
 src/sound_play.s      the sound player: YM2203 registers -> sampled voices, mixed for Paula
-tools/sound/          YM2203 FM model, the instrument bank and the player's model (needs numpy)
+src/fx_play.s         the sound effects as samples (no fast RAM)
+tools/sound/          YM2203 FM model, the instrument bank, the effects' samples (needs numpy)
 src/viewer.s          AGA level viewer (display engine, milestone 1)
 tools/bt_rom.py       ROM set loading and graphics decoding (from MAME's driver)
 tools/bt_level.py     level maps, palette scripts, tile layouts

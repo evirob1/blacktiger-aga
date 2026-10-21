@@ -1,15 +1,18 @@
 ; Black Tiger AGA - bootblock
 ; On the disk after it: the payload, then the sound data (the sound program's
-; ROM and the instrument bank), each packed by tools/lzpack.py.
+; ROM and the instrument bank), each packed by tools/lzpack.py, then the
+; effects' samples (tools/sound/effects.py, not packed).
 ; The payload is loaded below the top of its memory block and unpacked to the
 ; bottom (BSS after it); the sound data at the end of the block, its packed
-; form just below. Where the packed data was is zeroed again, as allocated. Then the payload starts
-; with A6 = ExecBase, A3 = a separate chip RAM block or 0, and A2 = the sound
-; data (its ROM, after a 16K window), or 0 if there was no room for it:
+; form just below. Where the packed data was is zeroed again, as allocated.
+; Then the payload starts with A6 = ExecBase, A3 = a separate chip RAM block
+; or 0, A2 = the sound data (its ROM, after a 16K window) or 0, D6 = the
+; effects' samples or 0:
 ;  * fast RAM: the payload, its BSS and the sound data go into fast RAM, the
 ;    display's chip RAM areas into a chip RAM block of their own (A3)
-;  * otherwise everything goes into one chip RAM block (A3 = 0); if that
-;    won't fit, one without the sound data (the game runs silent)
+;  * otherwise everything goes into one chip RAM block (A3 = 0), with the
+;    effects' samples at its end instead of the sound data; if that won't
+;    fit, one without them (the game runs silent)
 ; Sizes and offsets are patched in by tools/mkadf.py.
 
 	section	boot,code
@@ -35,6 +38,7 @@
 	add.l	snd_at_fast(pc),a2
 	lea	-$4000(a2),a0		; the payload's packed data below it
 	move.l	a0,d7
+	moveq	#0,d6
 	bra.s	.load
 .nochip	move.l	a4,a1			; no room in chip RAM after all: one block
 	move.l	fast_size(pc),d0
@@ -46,17 +50,21 @@
 	tst.l	d0
 	beq.s	.quiet
 	move.l	d0,a4
-	move.l	a4,a2			; sound at the end of the block,
-	add.l	snd_at_stock(pc),a2
-	lea	-$4000(a2),a0		; the payload's packed data below it
-	move.l	a0,d7
+	sub.l	a2,a2			; the effects at the end of the block, the
+	move.l	a4,d6			; payload's packed data below them
+	add.l	fx_at_stock(pc),d6
+	move.l	d6,d7
+	tst.l	fx_load(pc)
+	bne.s	.load
+	moveq	#0,d6
 	bra.s	.load
 .quiet	sub.l	a2,a2			; without the sound data: silent
+	moveq	#0,d6
 	move.l	stock_quiet(pc),d0
 	move.l	#$10002,d1
 	jsr	-198(a6)
 	tst.l	d0
-	beq.s	.fail
+	beq	.fail
 	move.l	d0,a4
 	move.l	a4,d7
 	add.l	stock_quiet(pc),d7
@@ -89,7 +97,15 @@
 	bsr	clear
 	bra.s	.go
 .nosnd	sub.l	a2,a2
-.go	move.l	a5,a1
+.go	move.l	d6,d0			; the effects: read in place
+	beq.s	.mot
+	move.l	d0,a0
+	move.l	#1024,d0
+	add.l	load_size(pc),d0
+	add.l	sound_load(pc),d0
+	move.l	fx_load(pc),d1
+	bsr	read
+.mot	move.l	a5,a1
 	move.w	#9,28(a1)		; TD_MOTOR
 	clr.l	36(a1)			; off
 	jsr	-456(a6)
@@ -151,4 +167,5 @@ chip_size	dc.l	0		; patched: chip areas A + B
 stock_size	dc.l	0		; patched: payload + BSS + chip area B
 stock_quiet	dc.l	0		; patched: the same without the sound data
 snd_at_fast	dc.l	0		; patched: the sound ROM's place in the fast block
-snd_at_stock	dc.l	0		; patched: and in the one block
+fx_at_stock	dc.l	0		; patched: the effects' place in the one block
+fx_load		dc.l	0		; patched: the effects, rounded to 512 (0: none)

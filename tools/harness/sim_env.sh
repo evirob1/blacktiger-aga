@@ -19,3 +19,7 @@ if [ -f build/game/sound.bin.at ]; then   # (written by tools/mkadf.py)
   read AT_STOCK AT_FAST < build/game/sound.bin.at
   export BT_SOUND=build/game/sound.bin,$AT_STOCK,$AT_FAST
 fi
+if [ -f build/game/fx_bank.bin.at ]; then
+  read FX_AT < build/game/fx_bank.bin.at
+  export BT_FX=build/game/fx_bank.bin,$FX_AT
+fi

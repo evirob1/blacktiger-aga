@@ -208,6 +208,8 @@ start:
 	jsr	-30(a6)			; Exec Supervisor(): continue in supervisor mode
 super:
 	move.w	#$2700,sr
+	lea	fx_bank(pc),a0		; d6 (bootblock): the effects as samples, or 0
+	move.l	d6,(a0)
 	lea	snd_a6(pc),a0		; a2 (bootblock): the sound program's ROM and
 	move.l	a2,(a0)			; the bank, at its memory's $8000 (src/sound.s),
 	lea	snd_on(pc),a0		; or 0: no room for sound
@@ -261,7 +263,14 @@ super:
 	move.l	chipb(pc),a0		; then the player (audio interrupt, level 4)
 	add.l	#CB_AUDIO,a0
 	bsr	play_init
-.quiet
+	bra.s	.nofx
+.quiet	move.l	fx_bank(pc),d0		; without fast RAM: the effects as samples
+	beq.s	.nofx
+	move.l	d0,a1
+	move.l	chipb(pc),a0
+	add.l	#CB_AUDIO,a0
+	bsr	fx_init
+.nofx
 	move.w	#$2000,sr
 	bra	rt_init			; Z80 power on (never returns)
 
@@ -338,6 +347,8 @@ SNDLOG	macro				; (the sound program's YM writes: for tests)
 	endm
 	include	"sound.s"		; the sound board's program, translated
 	include	"sound_play.s"		; and its chips' registers made into sound
+	include	"fx_bank.i"		; (tools/sound/effects.py)
+	include	"fx_play.s"		; or the effects as samples
 
 ; d0 = port -> d0.b = value. Keeps every other register. (a6 = Z80 memory)
 plat_in:
@@ -377,7 +388,14 @@ plat_out:
 	move.b	d0,pv_io(a0,d7.w)
 	tst.w	d7
 	bne.s	.n0
-	tst.b	snd_nomusic(pc)		; port 0: a command for the sound board
+	tst.l	fx_bank(pc)		; port 0: the effects as samples, or a
+	beq.s	.snd			; command for the sound board
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	bsr	fx_command
+	move.w	(sp)+,sr
+	bra.s	.x
+.snd	tst.b	snd_nomusic(pc)
 	beq.s	.cmd			; (music off: its commands, $21-$37, left
 	cmp.b	#$21,d0			; out)
 	blo.s	.cmd
@@ -2674,7 +2692,9 @@ coplist_ptr:		dc.l	0
 bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py: BSS,
 			dc.l	CHIPA_FAST		; chip area A in fast RAM mode,
 			dc.l	CHIPB_SIZE		; chip area B,
-			dc.l	SOUND_SIZE		; its sound part)
+			dc.l	SOUND_SIZE		; its sound part,
+			dc.l	FX_SIZE			; the effects' samples)
+fx_bank:		dc.l	0		; the effects' samples (no fast RAM), or 0
 snd_on:			dc.b	0		; room for sound: it plays
 snd_nomusic:		dc.b	0		; music off (effects only): without fast RAM
 clean_on:		dc.b	0		; the clean background buffer (fast RAM)
@@ -2738,6 +2758,9 @@ CB_SPRITES	equ	CB_BGTILES+2048*128
 CB_SPRMASK	equ	CB_SPRITES+2048*128
 CB_AUDIO	equ	CB_SPRMASK+2048*32	; the sound player's output
 CHIPB_SIZE	equ	(CB_AUDIO+PLAY_BUFSIZE+7)&-8
+	ifgt	FX_BUFSIZE-PLAY_BUFSIZE
+	fail	"the effects' output buffers don't fit in the player's"
+	endif
 ; the sound data, at the end of the program's block (in fast RAM if any) by
 ; the bootblock (src/boot.s), from the disk after the payload: the sound CPU's
 ; memory from $C000 (the player's tables in it), its ROM, the bank

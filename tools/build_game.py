@@ -87,6 +87,21 @@ def main():
         print("  (it needs numpy - pip install numpy - and gcc and git on the PATH)")
         open(os.path.join(out, "snd_bank.i"), "w").write("BANK_PATCHES\tequ\t0\nBANK_SIZE\tequ\t0\n")
         sound = None
+    # the effects as samples, for an A1200 without fast RAM: rendered by
+    # ymfm (fetched with git, built with g++)
+    fx = os.path.join(out, "fx_bank.bin")
+    try:
+        if sound is None:
+            raise OSError("no sound program")
+        subprocess.run([sys.executable, os.path.join(HERE, "sound", "effects.py"), fx,
+                        os.path.join(out, "fx_bank.i")], check=True)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print("sound: the effects' samples could not be made (%s): none without fast RAM" % e)
+        print("  (they need g++ and git on the PATH too)")
+        open(os.path.join(out, "fx_bank.i"), "w").write(
+            "FX_SIZE\tequ\t0\nFX_TABLES\tequ\t0\nFX_SILENT\tequ\t0\nFX_COUNT\tequ\t0\n"
+            "FX_REC\tequ\t14\nFX_PERIOD\tequ\t580\n")
+        fx = None
 
     boot = os.path.join(ROOT, "build", "boot.bin")
     build.assemble(os.path.join(ROOT, "src", "boot.s"), boot)
@@ -96,9 +111,10 @@ def main():
                    incdir=out, extra=["-I" + os.path.join(ROOT, "src"), "-L", lst] + (["-DPAL=1"] if a.pal else []))
     at = listing_symbol(lst, "bss_size")
     data = open(payload, "rb").read()
-    bss, chipa, chipb, sound_size = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big") for i in range(4))
+    bss, chipa, chipb, sound_size, fx_size = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big")
+                                              for i in range(5))
     mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"), chipa, chipb,
-                sound, sound_size, listing_symbol(lst, "bss_end"))
+                sound, sound_size, listing_symbol(lst, "bss_end"), fx, fx_size)
 
 
 if __name__ == "__main__":

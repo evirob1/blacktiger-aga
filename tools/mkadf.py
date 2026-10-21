@@ -49,12 +49,13 @@ def pack_cached(data, cache):
 
 
 def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, sound_size=0,
-          bss_end=0):
+          bss_end=0, fx_path=None, fx_size=0):
     """sound_path: the sound data (the sound program's ROM + the instrument
-    bank), after the payload on the disk; the bootblock puts it at the end of
-    the program's block, sound_size bytes there (its window, the ROM, the
-    bank), in fast RAM when there is some (bss_end: where chip area B starts
-    in the one-block layout)."""
+    bank), after the payload on the disk; with fast RAM the bootblock puts it
+    at the end of the program's block, sound_size bytes there (its window,
+    the ROM, the bank). fx_path: the effects' samples (fx_size bytes), after
+    it on the disk, not packed: without fast RAM they go at the end of the
+    one block instead (bss_end: where chip area B starts in it)."""
     boot = bytearray(open(boot_path, "rb").read())
     payload = open(payload_path, "rb").read()
     packed = pack_cached(payload, payload_path + ".lz")
@@ -64,8 +65,11 @@ def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, 
     load = (len(payload) + 511) & ~511          # unpacked, as laid out in memory
     disk = (len(packed) + 511) & ~511
     sdisk = (len(sound) + 511) & ~511
-    if 1024 + disk + sdisk > ADF_SIZE:
-        raise SystemExit("too big for an ADF: %d bytes packed" % (disk + sdisk))
+    fx = open(fx_path, "rb").read() if fx_path else b""
+    fxdisk = (len(fx) + 511) & ~511
+    if 1024 + disk + sdisk + fxdisk > ADF_SIZE:
+        raise SystemExit("too big for an ADF: %d bytes (%d over)" %
+                         (1024 + disk + sdisk + fxdisk, 1024 + disk + sdisk + fxdisk - ADF_SIZE))
     # unpacked in place: the packed data sits at the top of the block, and the
     # output, growing from the bottom, must never reach the data still unread
     if load + bss - disk < lead(packed) + 16:
@@ -73,14 +77,16 @@ def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, 
     chipa = (chipa + 7) & ~7
     fast_at = (load + bss + 7) & ~7             # the sound data's place
     quiet = (max(load + bss, bss_end + chipb) + 7) & ~7
-    fast, chip, stock = fast_at + sound_size, chipa + chipb, quiet + sound_size
+    fast, chip, stock = fast_at + sound_size, chipa + chipb, quiet + fxdisk
     if sound_path and fast_at - sdisk < load:
         raise SystemExit("no room below the sound data for it packed")
     if sound_path:                              # (for tools/harness/sim_env.sh)
         open(sound_path + ".at", "w").write("%x %x\n" % (quiet + 0x4000, fast_at + 0x4000))
-    # the bootblock's last eight longs (src/boot.s)
-    boot[len(boot) - 32:len(boot)] = struct.pack(">IIIIIIII", disk, sdisk, fast, chip, stock, quiet,
-                                                 fast_at + 0x4000, quiet + 0x4000)
+    if fx_path:
+        open(fx_path + ".at", "w").write("%x\n" % quiet)
+    # the bootblock's last nine longs (src/boot.s)
+    boot[len(boot) - 36:len(boot)] = struct.pack(">IIIIIIIII", disk, sdisk, fast, chip, stock, quiet,
+                                                 fast_at + 0x4000, quiet, fxdisk)
     block = bytearray(1024)
     block[:len(boot)] = boot
     block[4:8] = b"\0\0\0\0"
@@ -89,12 +95,15 @@ def build(boot_path, payload_path, bss, out, chipa=0, chipb=0, sound_path=None, 
     adf[:1024] = block
     adf[1024:1024 + len(packed)] = packed
     adf[1024 + disk:1024 + disk + len(sound)] = sound
+    adf[1024 + disk + sdisk:1024 + disk + sdisk + len(fx)] = fx
     open(out, "wb").write(adf)
-    print("%s: payload %d bytes (%d packed), sound %d packed, bss %d, %d%% of disk used" %
-          (out, len(payload), len(packed), len(sound), bss, (1024 + disk + sdisk) * 100 // ADF_SIZE))
+    used = 1024 + disk + sdisk + fxdisk
+    print("%s: payload %d bytes (%d packed), sound %d packed, effects %d, bss %d, %d%% of disk used "
+          "(%d KB free)" % (out, len(payload), len(packed), len(sound), len(fx), bss, used * 100 // ADF_SIZE,
+                            (ADF_SIZE - used) // 1024))
     if chipb and sound_path:
-        print("  memory: %d KB of chip RAM (%d KB without sound), or %d KB fast + %d KB chip" %
-              (stock // 1024, quiet // 1024, fast // 1024, chip // 1024))
+        print("  memory: %d KB of chip RAM with the effects (%d KB without), or %d KB fast + %d KB chip"
+              " with all the sound" % (stock // 1024, quiet // 1024, fast // 1024, chip // 1024))
     elif chipb:
         print("  memory: %d KB of chip RAM, or %d KB fast + %d KB chip (no sound)" %
               (stock // 1024, fast // 1024, chip // 1024))

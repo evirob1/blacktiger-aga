@@ -495,17 +495,28 @@ int main(int argc, char **argv)
     }
     else fread(mem + BASE, 1, 0x400000, f);
     fclose(f);
-    /* the sound data, where the bootblock puts it (BT_SOUND=file,offset from
-       the program in one block,offset in the fast block); its address in A2 */
-    unsigned int snd_at = 0;
-    if (!resume && !adf && getenv("BT_SOUND") && !getenv("BT_NOSOUND")) {
+    /* the sound data, where the bootblock puts it: with fast RAM the sound
+       program (BT_SOUND=file,offset in one block (unused),offset in the fast
+       block; its address in A2), else the effects' samples (BT_FX=file,offset;
+       D6) */
+    unsigned int snd_at = 0, fx_at = 0;
+    if (!resume && !adf && !getenv("BT_NOSOUND")) {
         char name[512];
         unsigned int at_stock, at_fast;
-        if (sscanf(getenv("BT_SOUND"), "%511[^,],%x,%x", name, &at_stock, &at_fast) == 3) {
+        if (BASE > 0x10000 && getenv("BT_SOUND") &&
+            sscanf(getenv("BT_SOUND"), "%511[^,],%x,%x", name, &at_stock, &at_fast) == 3) {
             FILE *sf = fopen(name, "rb");
             if (!sf) { perror(name); return 1; }
-            snd_at = BASE + (BASE > 0x10000 ? at_fast : at_stock);
+            snd_at = BASE + at_fast;
             fread(mem + snd_at, 1, 0x100000, sf);
+            fclose(sf);
+        }
+        if (BASE <= 0x10000 && getenv("BT_FX") &&
+            sscanf(getenv("BT_FX"), "%511[^,],%x", name, &at_stock) == 2) {
+            FILE *sf = fopen(name, "rb");
+            if (!sf) { perror(name); return 1; }
+            fx_at = BASE + at_stock;
+            fread(mem + fx_at, 1, 0x100000, sf);
             fclose(sf);
         }
     }
@@ -545,6 +556,7 @@ int main(int argc, char **argv)
     m68k_set_reg(M68K_REG_A3, BASE > 0x10000 ? CHIPBLOCK : 0);
     m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
     m68k_set_reg(M68K_REG_A2, snd_at);           /* (0: no room for sound) */
+    m68k_set_reg(M68K_REG_D6, fx_at);
     if (adf) {                                   /* (as Exec runs a bootblock) */
         m68k_set_reg(M68K_REG_A1, IOREQ);
         m68k_set_reg(M68K_REG_A3, 0);
