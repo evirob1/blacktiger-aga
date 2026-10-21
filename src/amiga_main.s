@@ -189,7 +189,7 @@ pv_overload	rs.w	1			; slots borrowed (count, for amiga_sim)
 pv_borrowed	rs.b	1			; the last get_slot borrowed a slot
 pv_dbusy	rs.b	1			; the display is in the middle of a frame
 pv_starve	rs.w	1			; vblanks since the display finished a frame
-pv_paldirty	rs.w	1			; copper lists whose palette section is stale
+pv_paldirty	rs.w	1			; copper lists whose palette section is stale (bit per buffer)
 pv_rowpal	rs.b	TXROWS*8		; text palette per row and sprite
 pv_rgb		rs.w	256			; background colours, 12 bit (pen 15: backdrop)
 pv_sprgb	rs.w	128			; sprite colours (follows pv_rgb: palettes 16-23)
@@ -776,7 +776,7 @@ init_display:
 	clr.w	pv_shown(a4)
 	clr.w	pv_back(a4)		; buffer 0 on screen first
 	bsr	set_buffer
-	move.w	#NBUF,pv_paldirty(a4)
+	move.w	#(1<<NBUF)-1,pv_paldirty(a4)
 	bsr	build_copper
 	lea	CUSTOM,a6
 	move.l	coplist_ptr(pc),COP1LC(a6)
@@ -1205,7 +1205,7 @@ get_slot:
 	bsr	forget_pal
 .take	move.b	d0,(a0,d1.w)
 	move.b	d1,pv_slot_of(a4,d0.w)
-	move.w	#NBUF,pv_paldirty(a4)
+	move.w	#(1<<NBUF)-1,pv_paldirty(a4)
 .have	move.w	d1,d0
 	movem.l	(sp)+,d1-d3/a0
 	rts
@@ -2191,7 +2191,7 @@ update_palette:
 	move.w	#$3ff,d0
 	bsr	pal_rgb
 	move.w	d0,(a2)
-	move.w	#NBUF,pv_paldirty(a4)	; all copper lists
+	move.w	#(1<<NBUF)-1,pv_paldirty(a4)	; all copper lists
 	addq.w	#1,pv_textver(a4)
 	rts
 ; 16 colours from palette entry d3 to (a2); pen 15 (transparent) is the backdrop
@@ -2244,9 +2244,9 @@ build_copper:
 	move.l	a0,(a2)
 
 	; palette section (fixed size, at the start): rewritten only when stale
-	tst.w	pv_paldirty(a4)
+	move.w	pv_back(a4),d0		; (a count instead missed a buffer that
+	bclr	d0,pv_paldirty+1(a4)	; wasn't drawn into: wrong colours there)
 	beq.s	.palok
-	subq.w	#1,pv_paldirty(a4)
 	moveq	#0,d4			; colour bank: 2 slots
 	moveq	#0,d6			; slot
 .bank	move.w	#BPLCON3,(a0)+
