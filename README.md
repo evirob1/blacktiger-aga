@@ -19,7 +19,7 @@ set). Please don't distribute the built disk images.
 | Game sprites (player, enemies, shots) | done: blitter objects, double buffered; matches a MAME-style reference render |
 | Background priority (scenery in front of sprites) | next |
 | Code coverage of later levels | in progress: code the recordings never reached stops with a red screen |
-| Sound | first version: the arcade's sound program translated (its YM2203 register writes match MAME exactly), played through a software mixer of sampled FM instruments and SSG tones |
+| Sound | the arcade's sound program translated (its YM2203 register writes match MAME exactly), played through a software mixer of sampled FM instruments and SSG tones, or (68040 / 68060) the chips synthesised in real time; effects as samples on a stock A1200 |
 | WHDLoad/HD install | planned |
 
 See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and the roadmap.
@@ -72,6 +72,12 @@ as samples straight on Paula's four channels instead (rendered at build time
 by ymfm, MAME's YM2203 emulation; about 2% of the CPU), and no music. The game
 itself always runs at full speed: sound costs display frames.
 
+On a 68040 or 68060 with fast RAM the two YM2203s are synthesised instead, in
+real time (src/fm_synth.s: FM operators, envelopes and the SSG as the chips do
+them, after ymfm; 13.9 kHz, 14-bit output): much closer to the arcade, at
+about 3.5 million instructions a second. **F10** switches between that and the
+sampled player (on any CPU with fast RAM: try it on a fast 68030 too).
+
 The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
 arcade's own frame rate: the game runs at the original speed. That needs a
 display that accepts 60 Hz (any 15 kHz arcade monitor or most TVs; WinUAE
@@ -111,6 +117,7 @@ src/boot.s            bootblock: loads the program and the sound data
 src/sound.s           the arcade's sound CPU: its translated program's runtime, YM2203 registers
 src/sound_play.s      the sound player: YM2203 registers -> sampled voices, mixed for Paula
 src/fx_play.s         the sound effects as samples (no fast RAM)
+src/fm_synth.s        the YM2203s synthesised (68040 / 68060 with fast RAM; src/fm_test.s: its test)
 tools/sound/          YM2203 FM model, the instrument bank, the effects' samples (needs numpy)
 src/viewer.s          AGA level viewer (display engine, milestone 1)
 tools/bt_rom.py       ROM set loading and graphics decoding (from MAME's driver)

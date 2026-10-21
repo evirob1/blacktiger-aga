@@ -172,7 +172,7 @@ pv_helpkey	rs.b	1			; Help key held last frame
 pv_clives	rs.b	1			; test mode: lives kept at least at this
 pv_level	rs.b	1			; F1-F8: start the next game at level 1-8 (0: as usual)
 pv_f9key	rs.b	1			; F9 held last frame
-		rs.b	1
+pv_f10key	rs.b	1			; F10 held last frame
 pv_ctime	rs.w	1			; time (minutes << 8 | seconds, BCD)
 pv_ctick	rs.w	1			; frames since the time last changed
 pv_usedacc	rs.l	1			; background palettes on screen
@@ -218,6 +218,14 @@ super:
 	lea	snd_nomusic(pc),a0	; no fast RAM: sound effects only (F9: music
 	move.l	a3,d0			; too)
 	seq	(a0)
+	sne	d0			; a 68040 / 68060 with fast RAM and the
+	and.b	snd_on(pc),d0		; sound: the chips synthesised (F10: the
+	moveq	#-$78,d1		; samples instead) ($88)
+	and.b	$129(a6),d1		; (ExecBase AttnFlags: 68040, 68060)
+	sne	d1
+	and.b	d1,d0
+	lea	snd_hifi(pc),a0
+	move.b	d0,(a0)
 	lea	chipa(pc),a0		; a3 (bootblock): separate chip RAM block, or 0
 	move.l	a3,d0
 	bne.s	.fast
@@ -260,9 +268,7 @@ super:
 	tst.b	snd_on(pc)
 	beq.s	.quiet
 	bsr	snd_init		; the sound board: its program's start-up,
-	move.l	chipb(pc),a0		; then the player (audio interrupt, level 4)
-	add.l	#CB_AUDIO,a0
-	bsr	play_init
+	bsr	snd_player		; then the player (audio interrupt, level 4)
 	bra.s	.nofx
 .quiet	move.l	fx_bank(pc),d0		; without fast RAM: the effects as samples
 	beq.s	.nofx
@@ -343,10 +349,33 @@ ROM_PRELOADED	equ	1		; (unpack_data copies the fixed ROM)
 SND_ROM_IN_PLACE equ	1		; (unpacked there: unpack_data)
 	include	"snd_bank.i"		; (tools/sound/bank.py)
 
+SND_HIFI	equ	1		; (src/sound.s: snd_timer renders as it goes)
 SNDLOG	macro				; (the sound program's YM writes: for tests)
 	endm
 	include	"sound.s"		; the sound board's program, translated
-	include	"sound_play.s"		; and its chips' registers made into sound
+	include	"sound_play.s"		; and its chips' registers made into sound:
+	include	"fm_synth.s"		; as samples, or synthesised (snd_hifi)
+
+; the player: the synthesiser (snd_hifi: its memory after the bank) or the
+; samples
+snd_player:
+	movem.l	d0/a0-a1,-(sp)
+	move.l	chipb(pc),a1
+	add.l	#CB_AUDIO,a1
+	tst.b	snd_hifi(pc)
+	beq.s	.smp
+	move.l	snd_a6(pc),a0
+	add.l	#$8000+BANK_SIZE+3,a0
+	move.l	a0,-(sp)
+	moveq	#-4,d0
+	and.l	d0,(sp)
+	move.l	(sp)+,a0
+	bsr	sy_init
+	bra.s	.x
+.smp	move.l	a1,a0
+	bsr	play_init
+.x	movem.l	(sp)+,d0/a0-a1
+	rts
 	include	"fx_bank.i"		; (tools/sound/effects.py)
 	include	"fx_play.s"		; or the effects as samples
 
@@ -1100,7 +1129,22 @@ test_mode:
 	ori.w	#$0700,sr
 	bsr	snd_init
 	move.w	(sp)+,sr
-.nf9	moveq	#8-1,d0			; F1-F8: the level the next game starts at
+.nf9	tst.b	pv_keys+$59(a4)		; F10: the chips synthesised (fast 68040 /
+	sne	d0			; 68060) or as samples (on press)
+	move.b	pv_f10key(a4),d1
+	move.b	d0,pv_f10key(a4)
+	not.b	d1
+	and.b	d1,d0
+	beq.s	.nf10
+	tst.b	snd_on(pc)
+	beq.s	.nf10
+	lea	snd_hifi(pc),a1
+	not.b	(a1)
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	bsr	snd_player
+	move.w	(sp)+,sr
+.nf10	moveq	#8-1,d0			; F1-F8: the level the next game starts at
 .lk	tst.b	pv_keys+$50(a4,d0.w)	; (PLAT_LEVEL)
 	beq.s	.lk2
 	move.b	d0,pv_level(a4)
@@ -2742,8 +2786,8 @@ CA_FLIPCACHE	equ	CA_FLIPBUF+MAXBOB*160	; 64 x 160
 CA_FLIPTILE	equ	CA_FLIPCACHE+64*160
 CA_SAVE0	equ	CA_FLIPTILE+128		; NBUF save areas
 CHIPA_SIZE	equ	CA_SAVE0+NBUF*SAVESIZE
-	ifgt	CHIPA_SIZE-(packed_end-z80rom)
-	fail	"display buffers don't fit in the fixed ROM copy + packed data's space"
+	ifgt	CHIPA_SIZE-(packed_end-z80rom)	; (the rest of their room: here, after
+	ds.b	CHIPA_SIZE-(packed_end-z80rom)	; the packed data - nothing between)
 	endif
 ; with fast RAM (a chip RAM block of their own) no save areas: a clean copy of
 ; the background instead (clean_on), sprites restored from it
@@ -2757,14 +2801,19 @@ CB_BGTILES	equ	0			; blitter sources
 CB_SPRITES	equ	CB_BGTILES+2048*128
 CB_SPRMASK	equ	CB_SPRITES+2048*128
 CB_AUDIO	equ	CB_SPRMASK+2048*32	; the sound player's output
+	ifgt	SY_BUFSIZE-PLAY_BUFSIZE
+CHIPB_SIZE	equ	(CB_AUDIO+SY_BUFSIZE+7)&-8
+	else
 CHIPB_SIZE	equ	(CB_AUDIO+PLAY_BUFSIZE+7)&-8
+	endif
 	ifgt	FX_BUFSIZE-PLAY_BUFSIZE
 	fail	"the effects' output buffers don't fit in the player's"
 	endif
 ; the sound data, at the end of the program's block (in fast RAM if any) by
 ; the bootblock (src/boot.s), from the disk after the payload: the sound CPU's
 ; memory from $C000 (the player's tables in it), its ROM, the bank
-SOUND_SIZE	equ	$4000+$8000+BANK_SIZE
+; (and the synthesiser's memory after it)
+SOUND_SIZE	equ	$4000+$8000+((BANK_SIZE+3)&-4)+SY_SIZE
 
 ; BSS: allocated (cleared) by the bootblock right after the loaded file
 	cnop	0,8

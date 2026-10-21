@@ -50,6 +50,7 @@ snd_timer:
 	move.l	sp,(a0)
 	lea	snd_tvars(pc),a1
 	move.l	d0,ST_LEFT(a1)
+	move.l	d0,ST_ALL(a1)
 	bne.s	.run
 	clr.l	ST_BUSY(a1)		; (0: an interrupt now - tests)
 .run	move.l	snd_a6(pc),a6
@@ -108,6 +109,17 @@ snd_timer:
 	moveq	#3,d1			; the interrupt line follows the flags
 	and.b	ST_STATUS(a1),d1
 	beq.s	.next
+	ifd	SND_HIFI
+	tst.b	snd_hifi(pc)		; synthesised: the sound up to now, before
+	beq.s	.nhf			; it changes (src/fm_synth.s)
+	move.l	ST_ALL(a1),d1
+	move.l	d1,d0
+	sub.l	ST_LEFT(a1),d0
+	bsr	sy_render
+	moveq	#3,d1
+	and.b	ST_STATUS(a1),d1
+.nhf
+	endif
 	move.b	d1,(SZE000,a6)
 	lea	snd_rt(pc),a4
 	sub.l	a5,a5			; (the translation counts T-states in a5)
@@ -175,6 +187,12 @@ ym_write:
 	move.b	d0,d6
 	lea	ym_regs(pc),a0
 	move.b	d7,(a0,d6.w)
+	ifd	SND_HIFI
+	tst.b	snd_hifi(pc)		; (synthesised: its settings again)
+	beq.s	.nhf
+	bsr	sy_reg
+.nhf
+	endif
 	movem.l	(sp)+,d6-d7/a0
 	move.w	(sp)+,ccr
 	rts
@@ -216,6 +234,12 @@ ym_write:
 .w	move.b	d7,(a0,d1.w)
 .k	cmp.b	#$28,d0			; key on / off: d7 = slots << 4 | channel
 	bne.s	.x
+	ifd	SND_HIFI
+	tst.b	snd_hifi(pc)		; (synthesised: in order, src/fm_synth.s)
+	beq.s	.nhk
+	bsr	sy_key
+.nhk
+	endif
 	moveq	#3,d1
 	and.w	d7,d1
 	cmp.w	#3,d1
@@ -295,6 +319,7 @@ ST_REMA		rs.l	1		; time to timer A's next overflow
 ST_REMB		rs.l	1
 ST_LEFT		rs.l	1		; snd_timer: the time still to run
 ST_BUSY		rs.l	1		; the interrupt routine still running for
+ST_ALL		rs.l	1		; snd_timer: all of its time
 ST_STATUS	rs.b	1		; bit 0: timer A flag, bit 1: timer B
 		rs.b	1
 ST_SIZE		rs.b	0
@@ -304,6 +329,7 @@ snd_sp:		dc.l	0
 snd_a6:		dc.l	0		; the sound CPU's memory + $8000 (set by the includer)
 snd_latch:	dc.b	0
 snd_held:	dc.b	0
+snd_hifi:	dc.b	0		; the chips synthesised (src/fm_synth.s), not samples
 		even
 
 	include	"sound_code.s"		; the translation (tools/z80/translate.py --sound)

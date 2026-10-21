@@ -49,7 +49,9 @@ static unsigned long long xcyc;
 static int chipwait;
 static unsigned int fast_from = 0xffffffff;
 static unsigned int ic_tag[64];
-static unsigned long long T(void) { return now + m68k_cycles_run() + xcyc; }
+/* BT_CPUMUL=n: a CPU n times as fast (an accelerator; the rest keeps its speed) */
+static unsigned int cpumul = 1;
+static unsigned long long T(void) { return now + m68k_cycles_run() / cpumul + xcyc; }
 static void waitd(unsigned int a) { if (a < fast_from || a >= 0xbf0000) xcyc += chipwait; }
 static void fetch(unsigned int a)
 {
@@ -549,10 +551,16 @@ int main(int argc, char **argv)
         static const unsigned char hdr[44] = {0};
         fwrite(hdr, 1, 44, wav);                    /* (filled in at the end) */
     }
+    if (getenv("BT_CPUMUL")) cpumul = (unsigned int)atoi(getenv("BT_CPUMUL"));
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68020);
     m68k_pulse_reset();
     m68k_set_reg(M68K_REG_A6, EXEC);
+    if (getenv("BT_ATTN")) {                     /* BT_ATTN=hex: ExecBase AttnFlags (e.g. 8f: a 68040) */
+        unsigned int f = (unsigned int)strtoul(getenv("BT_ATTN"), NULL, 16);
+        mem[EXEC + 0x128] = f >> 8;
+        mem[EXEC + 0x129] = f;
+    }
     m68k_set_reg(M68K_REG_A3, BASE > 0x10000 ? CHIPBLOCK : 0);
     m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
     m68k_set_reg(M68K_REG_A2, snd_at);           /* (0: no room for sound) */
@@ -597,8 +605,10 @@ int main(int argc, char **argv)
     int frame = 0, dumpi = 3;
     unsigned int last_e003 = 0, z80_frames = 0;
     while (frame < seconds * FPS) {
-        int c = m68k_execute(2000);
-        now += c;
+        static unsigned long long rawc;
+        rawc += m68k_execute(2000);
+        now += rawc / cpumul;
+        rawc %= cpumul;
         if (!lev3_addr) lev3_addr = rd32(0x6c);
         if (vbl_due) {
             vbl_due = 0;

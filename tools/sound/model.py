@@ -21,6 +21,10 @@ import wave
 import numpy as np
 
 import opn
+import ymfm
+
+USE_OPN = bool(__import__("os").environ.get("BT_OPNMODEL"))   # (the old Python model)
+YMFM_SCALE = 1 / 0.207          # ymfm's level -> opn.render's, which the levels were set by
 
 PERIOD = int(__import__("os").environ.get("BT_PERIOD", "384"))   # Paula period (PAL clock): src/sound_play.s
 RATE = 3546895 / PERIOD
@@ -74,7 +78,10 @@ class Sample:
         car = CARRIERS[fbalg & 7]
         fnum, block = self.note(max(f_ref, 30.0))
         self.f_ref = opn.freq(fnum, block) * FM_FMUL
-        data = np.array(opn.render(p, fnum, block, 0.7, rate=SRATE))
+        if USE_OPN:
+            data = np.array(opn.render(p, fnum, block, 0.7, rate=SRATE))
+        else:                   # (ymfm, MAME's emulation: the timbres as on the board)
+            data = ymfm.resample(ymfm.note(p, fnum, block, 0.7), SRATE) * YMFM_SCALE
         env = np.array([np.abs(data[i:i + 64]).max() for i in range(0, len(data), 64)])
         peak = env.max() or 1.0
         top = int(env.argmax())

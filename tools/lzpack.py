@@ -13,11 +13,54 @@ MIN_MATCH, MAX_MATCH = 3, 0x7E + 3
 MAX_DIST = 65535
 
 
-def pack(data):
-    out = bytearray()
-    lit = bytearray()
+def pack(data, chain=64):
+    """Optimal parse: the longest match at each position (hash chains), then
+    the cheapest way through (a literal run's header counted once)."""
+    n = len(data)
+    best_len, best_dist = [0] * n, [0] * n
     heads = {}
-    i, n = 0, len(data)
+    for i in range(n - 2):
+        key = data[i:i + 3]
+        chain_i = heads.get(key)
+        if chain_i is None:
+            heads[key] = [i]
+            continue
+        best, bd, lim = 0, 0, min(MAX_MATCH, n - i)
+        for j in reversed(chain_i[-chain:]):
+            d = i - j
+            if d > MAX_DIST:
+                break
+            if best >= lim:
+                break
+            if data[j + best] != data[i + best]:
+                continue
+            k = MIN_MATCH
+            while k < lim:
+                step = min(16, lim - k)
+                if data[j + k:j + k + step] == data[i + k:i + k + step]:
+                    k += step
+                else:
+                    while data[j + k] == data[i + k]:
+                        k += 1
+                    break
+            if k > best:
+                best, bd = k, d
+        best_len[i], best_dist[i] = best, bd
+        chain_i.append(i)
+    # from the end: fresh[i] = the cost from i, run[i] = ... with a literal
+    # run open (its header paid), take[i] = the match length to use at i
+    inf = 1 << 60
+    fresh, run, take = [0] * (n + 1), [0] * (n + 1), [0] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        m, ml = inf, 0
+        for ln in range(MIN_MATCH, best_len[i] + 1):
+            c = 3 + fresh[i + ln]
+            if c < m:
+                m, ml = c, ln
+        take[i] = ml
+        run[i] = min(1 + run[i + 1], m)
+        fresh[i] = min(2 + run[i + 1], m)
+    out, lit = bytearray(), bytearray()
 
     def flush():
         p = 0
@@ -28,34 +71,19 @@ def pack(data):
             p += k
         lit.clear()
 
+    i, open_run = 0, False
     while i < n:
-        best_len, best_dist = 0, 0
-        if i + MIN_MATCH <= n:
-            key = data[i:i + 3]
-            for j in reversed(heads.get(key, [])[-48:]):
-                d = i - j
-                if d > MAX_DIST:
-                    break
-                k = 3
-                while k < MAX_MATCH and i + k < n and data[j + k] == data[i + k]:
-                    k += 1
-                if k > best_len:
-                    best_len, best_dist = k, d
-                    if k == MAX_MATCH:
-                        break
-        if best_len >= MIN_MATCH:
-            flush()
-            out.append(0x80 | (best_len - 3))
-            out.extend(best_dist.to_bytes(2, "big"))
-            for p in range(i, i + best_len):
-                if p + 3 <= n:
-                    heads.setdefault(data[p:p + 3], []).append(p)
-            i += best_len
-        else:
+        m = 3 + fresh[i + take[i]] if take[i] else inf
+        if (1 if open_run else 2) + run[i + 1] <= m:
             lit.append(data[i])
-            if i + 3 <= n:
-                heads.setdefault(data[i:i + 3], []).append(i)
             i += 1
+            open_run = True
+        else:
+            flush()
+            out.append(0x80 | (take[i] - 3))
+            out.extend(best_dist[i].to_bytes(2, "big"))
+            i += take[i]
+            open_run = False
     flush()
     out.append(0xFF)
     return bytes(out)

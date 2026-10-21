@@ -32,10 +32,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "tools", "harness"))
 import sound_check  # noqa: E402
+sys.path.insert(0, HERE)
+import ymfm  # noqa: E402
 
 UNITS = sound_check.UNITS
 CLOCK = 3579545
-YM_RATE = CLOCK / 24                    # ym_render's output (OPN_FIDELITY_MIN)
+YM_RATE = CLOCK / 24                    # ym_render's output (tools/sound/ymfm.py)
 PERIOD = 580                            # Paula period (PAL clock): src/fx_play.s
 RATE = 3546895 / PERIOD                 # 6115 Hz
 BLOCK = 32
@@ -47,24 +49,6 @@ GAP = 10.0                              # seconds each effect gets
 FIB = [-34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21]
 TABLES = [[max(-127, min(127, round(d * 2 ** (k / 4 - 2)))) for d in FIB] for k in range(24)]
 SILENT = len(TABLES)
-
-
-def ym_render():
-    """ymfm (git) and tools/sound/ym_render.cpp (g++) -> the renderer's path."""
-    b = os.path.join(ROOT, "build", "sound")
-    y = os.path.join(ROOT, "build", "ymfm")
-    if not os.path.exists(os.path.join(y, "src", "ymfm_opn.cpp")):
-        subprocess.run(["git", "clone", "-q", "--depth", "1", "https://github.com/aaronsgiles/ymfm.git", y],
-                       check=True)
-    exe = os.path.join(b, "ym_render")
-    src = os.path.join(HERE, "ym_render.cpp")
-    if not os.path.exists(exe) or os.path.getmtime(exe) < os.path.getmtime(src):
-        os.makedirs(b, exist_ok=True)
-        s = os.path.join(y, "src")
-        subprocess.run(["g++", "-O2", "-std=c++14", "-I" + s, "-o", exe, src] +
-                       [os.path.join(s, f) for f in ("ymfm_opn.cpp", "ymfm_ssg.cpp", "ymfm_misc.cpp",
-                                                     "ymfm_adpcm.cpp")], check=True)
-    return exe
 
 
 def render_all():
@@ -91,20 +75,13 @@ def render_all():
             if p[0] == "W":
                 f.write("%.6f %s %s %s\n" % (int(p[1]) / UNITS, p[2], p[3], p[4]))
     fm, ssg = (os.path.join(sound_check.B, n) for n in ("fx_fm.f32", "fx_ssg.f32"))
-    subprocess.run([ym_render(), log, str(t / UNITS), fm, ssg], check=True)
+    subprocess.run([ymfm.renderer(), log, str(t / UNITS), fm, ssg], check=True)
     x = np.fromfile(fm, dtype=np.float32).astype(float) + np.fromfile(ssg, dtype=np.float32)
     return {c: x[int(s * YM_RATE):int((s + GAP - 0.3) * YM_RATE)] for c, s in starts.items()}
 
 
 def resample(x):
-    """YM_RATE -> RATE: windowed-sinc low-pass at 0.45 RATE, then linear."""
-    fc = 0.45 * RATE / YM_RATE
-    n = np.arange(-400, 401)
-    h = 2 * fc * np.sinc(2 * fc * n) * np.blackman(len(n))
-    y = np.convolve(x, h / h.sum(), "same")
-    pos = np.arange(0, len(y) - 1, YM_RATE / RATE)
-    i = pos.astype(int)
-    return y[i] + (y[i + 1] - y[i]) * (pos - i)
+    return ymfm.resample(x, RATE)
 
 
 def trim(y):
