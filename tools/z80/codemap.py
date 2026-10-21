@@ -515,7 +515,7 @@ def object_scripts(cm):
                     return None
                 seen.add(a)
                 n += 1
-                if n > 100:
+                if n > 400:             # (level 8 has one of 160 records)
                     return None
                 b = sp[a]
                 called = False
