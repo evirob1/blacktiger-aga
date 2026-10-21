@@ -7,6 +7,7 @@ recorded from MAME (tools/mame/codemap.lua -> analysis/dynamic.txt).
 Code locations are (bank, addr): bank is None for the fixed ROM ($0000-$7FFF).
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,6 +48,7 @@ class CodeMap:
         self.ram_targets = set()
         self.bank_ctx = {}         # (bank, addr) -> bank mapped there (fixed code), False if mixed
         self.tables = {}           # (bank, table address) -> entry points read from it
+        self.rst_targets = {}      # sound CPU: rst $30 site -> its jump table's entries
 
     def add(self, bank, addr):
         """Trace from addr with `bank` mapped (None = unknown)."""
@@ -97,7 +99,7 @@ class CodeMap:
                         work.append((bank, tgt, a_val if k in ("jp", "jr") else None))
                     if k in ("jp", "jr") and ins.cond is None:
                         break
-                    if k == "call" and ins.cond is None and tgt in NO_RETURN:
+                    if k in ("call", "rst") and ins.cond is None and tgt in NO_RETURN:
                         break
                     if k in ("call", "rst"):
                         a_val = None
@@ -139,9 +141,41 @@ def load_dynamic(path):
     return entries
 
 
-def build(rom, dynamic_path=None):
+SOUND_ENTRY_POINTS = [0x0000, 0x0038]
+SOUND_RST_TABLE = 0x0030   # rst $30: jump through the table of words after it
+SOUND_CODE_END = 0x0DC1    # the command table: data from here on
+
+
+def rst_tables(cm):
+    """Sound CPU: the words after each rst $30 are a jump table (entry A),
+    up to where the first of its targets begins."""
+    rom = cm.rom
+    for (b, a), ins in list(cm.insns.items()):
+        if ins.kind != "rst" or ins.target != SOUND_RST_TABLE:
+            continue
+        p, end = a + 1, SOUND_CODE_END
+        targets = cm.rst_targets.setdefault((b, a), [])
+        while p + 2 <= end:
+            w = rom[p] | rom[p + 1] << 8
+            if not 0x0100 <= w < SOUND_CODE_END:
+                break
+            end = min(end, w)
+            if w not in targets:
+                targets.append(w)
+            k = loc(None, w)
+            if k not in cm.insns:
+                cm.entries.add(k)
+                cm.add(None, w)
+            p += 2
+
+
+def build(rom, dynamic_path=None, sound=False):
+    """sound: the sound CPU's program (32K, no banks, no main-board passes)."""
+    global NO_RETURN, BANK_SETTER
+    if sound:                       # (main ROM addresses: nothing special here)
+        NO_RETURN, BANK_SETTER = {SOUND_RST_TABLE}, None
     cm = CodeMap(rom)
-    for e in ENTRY_POINTS:
+    for e in SOUND_ENTRY_POINTS if sound else ENTRY_POINTS:
         cm.entries.add((None, e))
         cm.add(None, e)
     cm.seeds = set()
@@ -157,6 +191,12 @@ def build(rom, dynamic_path=None):
     # the static passes, until none of them finds anything new
     while True:
         n = len(cm.insns)
+        if sound:
+            rst_tables(cm)
+            multiway_returns(cm)
+            if len(cm.insns) == n:
+                break
+            continue
         static_tables(cm)
         data_pointers(cm)
         gap_routines(cm)
@@ -284,12 +324,64 @@ def stack_depths(cm):
                     continue
             if ins.kind == "call" and ins.cond is None and ins.target in NO_RETURN:
                 continue
+            if key in cm.rst_targets:
+                # a jump table (sound CPU's rst $30): to each entry, at this
+                # depth (the rst's return address is the table, popped again)
+                for w in cm.rst_targets[key]:
+                    work.append((loc(None, w), depth))
+                continue
             work.append((loc(key[0], key[1] + ins.length), depth))
     for key, ds in depths.items():
         t = cm.insns[key].text
         if t.startswith("pop ") and 0 in ds and len(ds) > 1:
             conflicts.append("%04x %s: reached at depths %s" % (key[1], t, sorted(ds)))
     return depths, multiway, conflicts
+
+
+def pop_kinds(cm, entries):
+    """What each pop takes off the stack: "c" (a code address: a return
+    address, 4 bytes on the 68k, or one pushed by hand with ld rr,code / push
+    rr) or "d" (a 16-bit value pushed with push). Follows the program from its
+    entry points through calls (each pushes a return address, and the callee
+    starts with the caller's stack), so a pop that escapes to a caller's frame
+    sees what is really there. Returns {(bank, addr) of a pop: set of kinds}
+    ("?": below the entry's stack). For the sound CPU's small program."""
+    kinds = {}
+    seen = set()
+    work = [(loc(None, e), ()) for e in entries]
+    while work:
+        key, stack = work.pop()
+        if (key, stack) in seen or key not in cm.insns or len(stack) > 24:
+            continue
+        seen.add((key, stack))
+        ins = cm.insns[key]
+        t = ins.text.split(" ;")[0]
+        nxt = loc(key[0], key[1] + ins.length)
+        if t.startswith("push "):
+            prev = cm.insns.get(loc(key[0], key[1] - 3))
+            code = (prev is not None and prev.pc + prev.length == key[1] and
+                    re.match(r"ld %s,\$[0-9a-f]{4}$" % t[5:], prev.text) is not None and
+                    loc(None, int(prev.text[-4:], 16)) in cm.insns)
+            stack = stack + ("c" if code else "d",)
+        elif t.startswith("pop "):
+            kinds.setdefault(key, set()).add(stack[-1] if stack else "?")
+            stack = stack[:-1]
+        if ins.kind == "ret" and ins.cond is None or ins.kind in ("reti", "jpind"):
+            continue
+        if ins.kind in ("jp", "jr") and ins.target is not None:
+            work.append((loc(key[0], ins.target), stack))
+            if ins.cond is None and t.split()[0] != "djnz":
+                continue
+        if ins.kind in ("call", "rst") and ins.target is not None:
+            if key in cm.rst_targets:       # a jump table: the rst's push is popped again
+                for w in cm.rst_targets[key]:
+                    work.append((loc(None, w), stack))
+                continue
+            work.append((loc(key[0], ins.target), stack + ("c",)))
+            if ins.cond is None and ins.target in NO_RETURN:
+                continue
+        work.append((nxt, stack))
+    return kinds
 
 
 DISPATCH = 0x0408   # add a,a / ld e,a / ld d,0 / add hl,de / ld e,(hl) / inc hl / ld d,(hl) / ex de,hl / jp (hl)

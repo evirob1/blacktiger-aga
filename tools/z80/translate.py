@@ -79,14 +79,15 @@ class T:
 
 
 class Translator:
-    def __init__(self, rom, cm, out, cycles=False, bank_sites=()):
+    def __init__(self, rom, cm, out, cycles=False, bank_sites=(), sound=False):
         self.rom, self.cm, self.out = rom, cm, out
+        self.sound = sound        # the sound CPU: plain memory, no banks or background RAM
         self.bank_sites = set(bank_sites)
         # stores into the background RAM window $C000-$CFFF (data/bg_stores.txt,
         # found by tools/harness/amiga_sim's BGSTALE report): base chosen at run time
         self.bg_stores = set()
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "bg_stores.txt")
-        if os.path.exists(path):
+        if os.path.exists(path) and not sound:
             for line in open(path):
                 f = line.split()
                 if f and not line.startswith("#"):
@@ -160,6 +161,8 @@ class Translator:
         """into = the base for the Z80 address in reg: a1 (current ROM bank)
         for $8000-$BFFF, the current background RAM bank (RT_BGPTR) for
         $C000-$CFFF, else a6. Keeps the CCR."""
+        if self.sound:
+            return ["movea.l a6,%s" % into]
         s, t = self.tmp(), self.tmp()
         return ["movea.w %s,%s" % (reg, into), "cmpa.w #-$3000,%s" % into, "bge.s %s" % s,
                 "cmpa.w #-$4000,%s" % into, "movea.l a1,%s" % into, "blt.s %s" % t,
@@ -256,6 +259,12 @@ class Translator:
                 return T(lines, defs=ALL, ok=ALL, end=True, succ=succ)
             return T(["bsr %s" % L(ins.target)], defs=ALL, ok=ALL)
         if k == "rst":
+            if self.sound and ins.target == SOUND_RST_TABLE:
+                # jump table dispatch: pop hl (the table, after the rst) / the
+                # lookup and jp (hl). The 68k return address isn't a Z80 address:
+                # load the table's into HL and go straight to the lookup
+                return T(["move.w #$%04x,d3" % (ins.pc + 1), "bra %s" % L(SOUND_RST_TABLE + 1)],
+                         clob=0, end=True, succ=[codemap.loc(None, SOUND_RST_TABLE + 1)])
             return T(["bsr %s" % L(ins.target)], defs=ALL, ok=ALL)
         if k == "ret":
             if ins.cond:
@@ -311,7 +320,7 @@ class Translator:
             if args[0] == "af":
                 return T(["move.b d0,-(sp)", "move.w ccr,-(sp)"], clob=CCR_MOVE, stack=True)
             return T(["move.w %s,-(sp)" % PAIR[args[0]]], clob=CCR_MOVE, stack=True)
-        if op == "pop" and self.depths.get(codemap.loc(bank, ins.pc)) == {0}:
+        if op == "pop" and self.pops_code(codemap.loc(bank, ins.pc)):
             # consumes the return address (4 bytes on the 68k stack)
             if t == "pop hl" and codemap.loc(bank, ins.pc) in self.mw_pops:
                 k = self.mw_pops[codemap.loc(bank, ins.pc)]
@@ -428,7 +437,8 @@ class Translator:
             # source and destination bases chosen once (a2 = DE' meanwhile on the stack)
             s = self.tmp()
             q = "addq" if op == "ldir" else "subq"
-            return T(["bsr bg_mark_%s" % ("up" if op == "ldir" else "down"), "move.l a2,-(sp)"] +
+            mark = [] if self.sound else ["bsr bg_mark_%s" % ("up" if op == "ldir" else "down")]
+            return T(mark + ["move.l a2,-(sp)"] +
                      self.select_base("d2", "a2") + self.select_base("d3") +
                      [s + ":", "move.b (a0,d3.w),(a2,d2.w)",
                       "%s.w #1,d3" % q, "%s.w #1,d2" % q, "subq.w #1,d1", "bne.s %s" % s,
@@ -436,7 +446,8 @@ class Translator:
                      defs=V, ok=0, clob=ALL)
         if op in ("ldi", "ldd"):
             q = "addq" if op == "ldi" else "subq"
-            return T(["bsr bg_mark_d2", "move.l a2,-(sp)"] + self.select_base("d2", "a2") + self.select_base("d3") +
+            mark = [] if self.sound else ["bsr bg_mark_d2"]
+            return T(mark + ["move.l a2,-(sp)"] + self.select_base("d2", "a2") + self.select_base("d3") +
                      ["move.b (a0,d3.w),(a2,d2.w)", "movea.l (sp)+,a2", "%s.w #1,d3" % q,
                       "%s.w #1,d2" % q, "subq.w #1,d1"], defs=V, ok=0, clob=ALL)
         if op in ("cpir", "cpdr", "cpi", "cpd", "ini", "ind", "inir", "indr", "outi", "outd",
@@ -466,12 +477,23 @@ class Translator:
         return label(b, addr)
 
     # ---------------------------------------------------------------- flow + liveness
+    def pops_code(self, key):
+        """Does the pop at key take a code address (4 bytes on the 68k)?"""
+        if self.sound:
+            return self.pop_kinds.get(key) == {"c"}
+        return self.depths.get(key) == {0}
+
     def run(self):
         self.depths, self.multiway, conflicts = codemap.stack_depths(self.cm)
+        if self.sound:
+            # (followed through calls: escapes to a caller's frame are exact)
+            self.pop_kinds = codemap.pop_kinds(self.cm, codemap.SOUND_ENTRY_POINTS)
+            conflicts = ["%04x %s: pops %s" % (k[1], self.cm.insns[k].text, "/".join(sorted(v)))
+                         for k, v in self.pop_kinds.items() if len(v) > 1 or "?" in v]
         self.problems += ["stack: " + c for c in conflicts if not c.startswith("00ec ")]
         self.mw_pops = {}
         for key, ins in self.cm.insns.items():
-            if ins.text == "pop hl" and self.depths.get(key) == {0}:
+            if ins.text == "pop hl" and self.pops_code(key):
                 k, p = 0, key[1] + 1
                 nxt = self.cm.insns.get(codemap.loc(key[0], p))
                 while nxt is not None and nxt.text == "inc hl":
@@ -498,10 +520,10 @@ class Translator:
                 trs[key] = self.tr_daa(key[0], ins)
             else:
                 trs[key] = self.tr(key[0], ins, None)
-                if ins.text not in ("ldir", "lddr", "ldi", "ldd") and (
+                if not self.sound and ins.text not in ("ldir", "lddr", "ldi", "ldd") and (
                         key in self.bank_sites or key in self.bg_stores or self.static_bank_read(key, ins)):
                     trs[key] = self.bank_aware(key, ins, trs[key])
-                if key == HIT_SITE:     # the damage of a hit, in c: the platform's test mode
+                if key == HIT_SITE and not self.sound:     # the damage of a hit, in c: the platform's test mode
                     trs[key].lines.append("PLAT_HIT")
                     trs[key].clob |= CCR_MOVE
         daa_keys = set(fused.values())
@@ -681,23 +703,47 @@ class Translator:
         return T(lines, use=C if op in ("adc", "sbc") else 0, defs=ALL, ok=Z | C, d6=True)
 
 
+# the sound CPU (--sound): the YM2203 register writes ($0153: wait for the
+# chip, then write; $0162) and the idle loop after the start-up ($0009: back
+# to the platform; everything else happens in the timer interrupt) are
+# hand-written (src/sound.s)
+SOUND_EXCLUDE = [(0x0009, 0x000C), (0x0153, 0x016D)]
+SOUND_RUNTIME = {0x0009, 0x0153, 0x0162}
+SOUND_RST_TABLE = codemap.SOUND_RST_TABLE
+
+
+def sound_names(text):
+    """The sound translation's names, apart from the game's: s_xxxx, snd_*."""
+    text = re.sub(r"\bz_([0-9a-f]{4})\b", r"s_\1", text)
+    text = re.sub(r"\b_t(\d+)\b", r"_s\1", text)
+    text = re.sub(r"\bzstk_", "sstk_", text)
+    return re.sub(r"\bz80_", "snd_", text)
+
+
 def main():
+    global EXCLUDE, RUNTIME_LABELS
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import bt_rom
-    rom = bt_rom.load_roms(sys.argv[1])["maincpu"]
-    cm = codemap.build(rom, sys.argv[2])
+    sound = "--sound" in sys.argv
+    if sound:
+        EXCLUDE, RUNTIME_LABELS = SOUND_EXCLUDE, SOUND_RUNTIME
+    rom = bt_rom.load_roms(sys.argv[1])["audiocpu" if sound else "maincpu"]
+    cm = codemap.build(rom, sys.argv[2], sound=sound)
     cycles = "--cycles" in sys.argv
-    args = [a for a in sys.argv if a != "--cycles"]
+    args = [a for a in sys.argv if a not in ("--cycles", "--sound")]
     sys.argv = args
     sites = []
     bank_file = os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])), "bank_reads.txt")
-    if os.path.exists(bank_file):
+    if os.path.exists(bank_file) and not sound:
         for line in open(bank_file):
             f = line.split()
             if f and not line.startswith("#"):
                 sites.append((None if f[0] == "ff" else int(f[0], 16), int(f[1], 16)))
-    tr = Translator(rom, cm, sys.argv[3], cycles, sites)
+    tr = Translator(rom, cm, sys.argv[3], cycles, sites, sound)
     tr.run()
+    if sound:
+        text = sound_names(open(sys.argv[3]).read())
+        open(sys.argv[3], "w").write(text)
     rep = sys.argv[4] if len(sys.argv) > 4 else None
     probs = sorted(set(tr.problems))
     if rep:
