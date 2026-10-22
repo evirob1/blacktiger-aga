@@ -1049,19 +1049,22 @@ draw_snapped:				; (tools/harness/amiga_sim.c: BT_SPRFORCE)
 .fr	move.w	d0,pv_back(a4)
 	move.w	#$2000,sr
 	bsr	set_buffer
+	tst.b	clean_on(pc)
+	bne.s	.clean
 	bsr	restore_bobs
 	bsr	update_palette
 	bsr	update_text
-	tst.b	clean_on(pc)
-	bne.s	.clean
 	bsr	update_background
 	bra.s	.bobs
-.clean	move.w	pv_back(a4),-(sp)	; the clean background, then this buffer's
-	move.w	#NBUF,pv_back(a4)	; cells made the same
+.clean	bsr	update_palette
+	bsr	update_text
+	move.w	pv_back(a4),-(sp)	; the clean background, then this buffer's
+	move.w	#NBUF,pv_back(a4)	; objects put back from it (as it is now:
+	bsr	set_buffer		; before, it could still hold a cell that is
+	bsr	update_background	; drawn again with the same tile) and its
+	move.w	(sp)+,pv_back(a4)	; cells made the same
 	bsr	set_buffer
-	bsr	update_background
-	move.w	(sp)+,pv_back(a4)
-	bsr	set_buffer
+	bsr	restore_bobs
 	bsr	sync_clean
 .bobs	bsr	draw_bobs
 	bsr	build_copper
