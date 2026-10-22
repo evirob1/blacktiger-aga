@@ -355,6 +355,13 @@ PLAT_LEVEL macro			; a game starts ($1E77, about to read the
 .nolevel\@
 	endm
 
+PLAT_NEWLEVEL macro			; a level starts ($1EE2, $2016): past the last
+	cmp.b	#8,(ZF3A1,a6)		; (after the ending) the arcade runs wild
+	blo.s	.nl\@			; through memory until it ends up at $0000 and
+	bra	plat_reset		; starts again: start again now
+.nl\@
+	endm
+
 PLAT_EI	macro				; enable + deliver a vblank that came while disabled
 	bsr	z80_ei
 	endm
@@ -426,6 +433,12 @@ plat_in:
 
 ; d7 = port, d0 = value. out ($06) buffers sprite RAM ($FE00-$FFFF) for the display.
 	Z80	ZFE00,$fe00
+; the Z80 reset, as at power on (PLAT_NEWLEVEL)
+plat_reset:
+	lea	rt_vars(pc),a0
+	sf	RT_PENDING(a0)
+	bra	rt_init
+
 plat_out:
 	move.l	a0,-(sp)
 	lea	pvars(pc),a0
@@ -2021,7 +2034,8 @@ restore_clean:
 ; with it). Copies only write the clean buffer's bytes, so cells that agree
 ; stay right however the memory columns overlap.
 sync_clean:
-	move.l	pv_sh(a4),a2
+	moveq	#2-1,d4			; (passes: a copy can spoil a neighbour)
+.pass	move.l	pv_sh(a4),a2
 	lea	bgshadow0+NBUF*SHSIZE(pc),a3	; (the clean shadow is the last)
 	moveq	#0,d5			; buffer slot
 	moveq	#0,d2			; column slot * 4
@@ -2029,6 +2043,7 @@ sync_clean:
 	bsr	blit_setup
 	move.w	#LINEB-2,BLTAMOD(a6)
 	move.w	#$09f0,BLTCON0(a6)
+	bclr	#31,d4			; (anything forgotten in this pass)
 .e	move.l	(a3)+,d0
 	cmp.l	(a2)+,d0
 	beq.s	.n
@@ -2054,12 +2069,50 @@ sync_clean:
 	add.l	#PLANEALLOC,a0
 	add.l	#PLANEALLOC,a1
 	dbf	d6,.p
+	lsr.w	#1,d1			; its 16 lines cover part of a column held
+	bsr.s	sync_forget		; a slot up or down (as bg_draw)
 .n	addq.w	#4,d2
 	cmp.w	#NCOLSLOT*4,d2
 	bne.s	.c
 	moveq	#0,d2
 	addq.w	#1,d5
 .c	dbf	d7,.e
+	tst.l	d4			; forgotten some: again (they are copied too)
+	dbpl	d4,.pass
+	rts
+
+; a cell copied (d5 = buffer slot, d2 = column slot * 4, d1 = memory column):
+; the same column slot one slot down holding a column left of it (M - 24k:
+; its first k lines are covered) or one slot up holding one right of it
+; (M + 24k: its last k lines) is forgotten in this buffer's shadow (d4 bit 31)
+sync_forget:
+	movem.l	d0/d3/a0,-(sp)
+	move.l	pv_sh(a4),a0
+	move.w	d5,d3
+	addq.w	#1,d3
+	and.w	#15,d3
+	mulu.w	#NCOLSLOT*4,d3
+	add.w	d2,d3
+	cmp.l	#-1,(a0,d3.w)
+	beq.s	.n1
+	move.b	1(a0,d3.w),d0
+	cmp.b	d1,d0
+	bhs.s	.n1
+	move.l	#-1,(a0,d3.w)
+	bset	#31,d4
+.n1	move.w	d5,d3
+	subq.w	#1,d3
+	and.w	#15,d3
+	mulu.w	#NCOLSLOT*4,d3
+	add.w	d2,d3
+	cmp.l	#-1,(a0,d3.w)
+	beq.s	.n2
+	move.b	1(a0,d3.w),d0
+	cmp.b	d1,d0
+	bls.s	.n2
+	move.l	#-1,(a0,d3.w)
+	bset	#31,d4
+.n2	movem.l	(sp)+,d0/d3/a0
 	rts
 
 save_bobs:

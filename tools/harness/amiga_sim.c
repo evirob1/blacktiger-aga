@@ -338,6 +338,26 @@ static void read_header(void)
 
 void harness_hook(unsigned int pc)
 {
+    /* BT_TRAPOUT=size: stop when the PC leaves the program (BASE .. +size),
+       with the last 200 PCs (offsets) and registers */
+    static unsigned int trap_size = (unsigned int)-1, ring[256], rn;
+    if (trap_size == (unsigned int)-1) trap_size = getenv("BT_TRAPOUT") ? (unsigned int)strtoul(getenv("BT_TRAPOUT"), NULL, 16) : 0;
+    if (trap_size && sim_frame > 300) {
+        if (pc - BASE >= trap_size) {
+            printf("TRAPOUT pc %x (offset %x)\n", pc, pc - BASE);
+            for (unsigned int i = rn > 200 ? rn - 200 : 0; i < rn; i++) printf("H %x\n", ring[i & 255]);
+            for (int r = M68K_REG_D0; r <= M68K_REG_A7; r++) printf("R%d %x\n", r, m68k_get_reg(NULL, r));
+            if (getenv("BT_DUMP")) {
+                char dn[256];
+                snprintf(dn, sizeof dn, "%s_trap.bin", getenv("BT_DUMP"));
+                FILE *df = fopen(dn, "wb");
+                fwrite(mem, 1, MEMSIZE, df);
+                fclose(df);
+            }
+            exit(1);
+        }
+        ring[rn++ & 255] = pc - BASE;
+    }
     if (adf && (pc == EXEC - 198 || pc == EXEC - 456)) adf_call(pc);
     if (adf && getenv("BT_BOOTTRACE") && pc >= BOOTAT && pc < BOOTAT + 0x128) printf("boot pc %x\n", pc - BOOTAT);
     if (pc == BASE && adf) read_header();
@@ -428,6 +448,20 @@ void harness_hook(unsigned int pc)
             unsigned int e = BASE + (unsigned int)strtoul(getenv("BT_SPRSNAP"), NULL, 16) + 127 * 4;
             int x = x0 + dx * sim_frame;
             mem[e] = code; mem[e + 1] = attr | (x & 256 ? 0x10 : 0); mem[e + 2] = y; mem[e + 3] = x;
+        }
+    }
+    /* BT_JUMP=frame,from,to: from that frame, the first time the PC reaches
+       offset "from" (e.g. the scheduler's idle loop), go to offset "to"
+       instead (a Z80 routine's translation) - to force game events */
+    if (getenv("BT_JUMP")) {
+        static int jdone;
+        int jf; unsigned int jfrom, jto;
+        if (!jdone && sscanf(getenv("BT_JUMP"), "%i,%x,%x", &jf, &jfrom, &jto) == 3 &&
+            sim_frame >= jf && pc == BASE + jfrom) {
+            jdone = 1;
+            printf("jump at frame %d: %x -> %x\n", sim_frame, jfrom, jto);
+            m68k_set_reg(M68K_REG_PC, BASE + jto);
+            return;
         }
     }
     if (pc == lev3_addr && !in_irq) { in_irq = 1; lev3_start = T(); }
@@ -629,6 +663,21 @@ int main(int argc, char **argv)
             unsigned int e003 = mem[z80(0xe003)];
             z80_frames += (e003 - last_e003) & 0xff;
             last_e003 = e003;
+            if (getenv("BT_JOYHOLD")) {      /* BT_JOYHOLD=from-to:hex: JOY1DAT held (0300 = left, 0003 = right) */
+                int f0 = 0, f1 = 0; unsigned int v = 0;
+                sscanf(getenv("BT_JOYHOLD"), "%d-%d:%x", &f0, &f1, &v);
+                joy1dat = frame >= f0 && frame <= f1 ? v : 0;
+            }
+            if (getenv("BT_JOYSEQ") && *getenv("BT_JOYSEQ")) {  /* BT_JOYSEQ=frame:hex:fire,...: from each frame on */
+                char *p = getenv("BT_JOYSEQ");
+                while (*p) {
+                    int f = (int)strtol(p, &p, 10);
+                    unsigned int v = (unsigned int)strtoul(p + 1, &p, 16);
+                    int fire = (int)strtol(p + 1, &p, 10);
+                    if (*p == ',') p++;
+                    if (frame >= f) { joy1dat = v; joyfire = fire; }
+                }
+            }
             if (getenv("BT_RANDJOY")) {
                 static unsigned int seed, hold;
                 if (!seed) seed = (unsigned int)atoi(getenv("BT_RANDJOY")) * 2654435761u | 1;

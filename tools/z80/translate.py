@@ -39,6 +39,10 @@ HIT_SITE = (None, 0x2F49)
 # a game starts: the level ($F3A1) sets where the player starts; the
 # platform's level select, PLAT_LEVEL
 LEVEL_SITE = (None, 0x1E77)
+# a level starts (after the ld sp of $1EDF and $2013): past the last one, after
+# the ending, the arcade runs wild through memory until it ends up at $0000
+# and starts again; PLAT_NEWLEVEL restarts it cleanly instead
+NEWLEVEL_SITES = {(None, 0x1EE2), (None, 0x2016)}
 
 
 def excluded(key):
@@ -540,6 +544,9 @@ class Translator:
                     trs[key].clob |= CCR_MOVE
                 if key == LEVEL_SITE and not self.sound:   # a game starts: the platform's level select
                     trs[key].lines.insert(0, "PLAT_LEVEL")
+                    trs[key].clob |= CCR_MOVE
+                if key in NEWLEVEL_SITES and not self.sound:   # a level starts: past the last, a reset
+                    trs[key].lines.insert(0, "PLAT_NEWLEVEL")
                     trs[key].clob |= CCR_MOVE
         daa_keys = set(fused.values())
         for k in daa_keys:

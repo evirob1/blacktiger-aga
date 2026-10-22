@@ -86,6 +86,7 @@ def main():
     con1 = state.get(0x102, 0)
     delay1 = (con1 & 15) | ((con1 >> 10) & 3) << 4     # PF1H in lowres pixels (bits 3-0, 11-10)
     fetchb = 36
+    probe = tuple(int(v) for v in os.environ["BT_PROBE"].split(",")) if os.environ.get("BT_PROBE") else None
     for y in range(H):
         l = DISP_Y0 + y
         for r, v in events.get(l, []):
@@ -111,6 +112,8 @@ def main():
                     c = rgb[cbase + s * 4 + (sa | sb << 1)]
                     break
             px[x, y] = c
+            if probe and (x, y) == probe:
+                print("probe %d,%d: value %02x, plane 0 at %x (+%d)" % (x, y, v, ptr[0] + (fx >> 3), fx >> 3))
         for p in range(8):
             ptr[p] += fetchb + mod
     img.save(sys.argv[2])
