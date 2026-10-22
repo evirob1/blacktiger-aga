@@ -68,13 +68,20 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
 
+      # the release: a tag v* pushed, or .github/release_version (on main) naming
+      # a version with no release yet - the release, and its tag, made here
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pre=""; case "${GITHUB_REF_NAME}" in v0.*) pre="--prerelease";; esac
-          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || gh release create "${GITHUB_REF_NAME}" $pre \
-            --title "Black Tiger AGA ${GITHUB_REF_NAME} (test release)" --notes-file .github/release_notes.md
-          gh release upload "${GITHUB_REF_NAME}" "dist/${{ matrix.asset }}" --clobber
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME}"; else v=$(tr -d ' \r\n' < .github/release_version 2>/dev/null || true); fi
+          [ -n "$v" ] || exit 0
+          if [ "${GITHUB_REF_TYPE}" != tag ] && gh release view "$v" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "${{ matrix.asset }}"; then
+            exit 0                          # (that release has it already)
+          fi
+          pre=""; case "$v" in v0.*) pre="--prerelease";; esac
+          gh release view "$v" >/dev/null 2>&1 || gh release create "$v" $pre --target "${GITHUB_SHA}" \
+            --title "Black Tiger AGA $v (test release)" --notes-file .github/release_notes.md || sleep 20
+          gh release upload "$v" "dist/${{ matrix.asset }}" --clobber
