@@ -230,6 +230,8 @@ super:
 	and.b	d1,d0
 	lea	snd_hifi(pc),a0
 	move.b	d0,(a0)
+	lea	cpu_flags(pc),a0
+	move.b	$129(a6),(a0)
 	lea	chipa(pc),a0		; a3 (bootblock): separate chip RAM block, or 0
 	move.l	a3,d0
 	bne.s	.fast
@@ -248,8 +250,16 @@ super:
 	move.w	#$7fff,INTENA(a6)
 	move.w	#$7fff,INTREQ(a6)
 	move.w	#$7fff,DMACON(a6)
-	moveq	#1,d0
-	movec	d0,cacr			; instruction cache on
+	moveq	#1,d0			; the instruction cache on: 68020 / 68030 (EI)
+	move.b	cpu_flags(pc),d1
+	btst	#7,d1
+	beq.s	.n60
+	move.l	#$00c08000,d0		; 68060: and the branch cache (EBC, CABC);
+	bra.s	.cc			; (not the data cache: chip RAM and the
+.n60	btst	#3,d1			; custom chips would need the MMU set up)
+	beq.s	.cc
+	move.l	#$00008000,d0		; 68040: IE (bit 0 here is nothing: all off)
+.cc	movec	d0,cacr
 	movec	vbr,a0
 	lea	lev2(pc),a1
 	move.l	a1,$68(a0)
@@ -2945,6 +2955,7 @@ fx_read:		dc.l	0		; ... the bytes of them read
 snd_on:			dc.b	0		; room for sound: it plays
 snd_nomusic:		dc.b	0		; music off (effects only): without fast RAM
 clean_on:		dc.b	0		; the clean background buffer (fast RAM)
+cpu_flags:		dc.b	0		; ExecBase AttnFlags (low byte): the CPU
 			even
 chipa:			dc.l	0		; chip RAM areas (see the end of the file)
 chipb:			dc.l	0
