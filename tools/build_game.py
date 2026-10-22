@@ -16,6 +16,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 import build  # noqa: E402  (vasm helper)
+import toolpaths  # noqa: E402
 import convert_game  # noqa: E402
 import mkadf  # noqa: E402
 from z80 import codemap, translate  # noqa: E402
@@ -39,6 +40,8 @@ def main():
     ap.add_argument("--pal", action="store_true",
                     help="50 Hz display (default: 60 Hz like the arcade, NTSC timing)")
     a = ap.parse_args()
+    a.roms = os.path.abspath(a.roms)
+    os.environ["BT_ROMS"] = a.roms          # (for the sound tools, processes of their own)
     out = os.path.join(ROOT, "build", "game")
     os.makedirs(out, exist_ok=True)
 
@@ -70,7 +73,7 @@ def main():
     # module settings). The bank needs numpy, gcc and git: without them the
     # disk is silent.
     open(os.path.join(out, "snd_rom.bin"), "wb").write(bt_rom.load_roms(a.roms)["audiocpu"])
-    subprocess.run([sys.executable, os.path.join(HERE, "z80", "translate.py"), a.roms,
+    subprocess.run(toolpaths.python(os.path.join(HERE, "z80", "translate.py")) + [a.roms,
                     os.path.join(ROOT, "data", "sound_entries.txt"), os.path.join(out, "sound_code.s"),
                     os.path.join(out, "sound_report.txt"), "--sound"], check=True)
     sound = os.path.join(out, "sound.bin")      # (after the payload on the disk: src/boot.s)
@@ -78,7 +81,7 @@ def main():
         if os.path.exists(stale):
             os.remove(stale)
     try:
-        subprocess.run([sys.executable, os.path.join(HERE, "sound", "bank.py"),
+        subprocess.run(toolpaths.python(os.path.join(HERE, "sound", "bank.py")) + [
                         os.path.join(out, "snd_bank.bin"), os.path.join(out, "snd_bank.i")], check=True)
         open(sound, "wb").write(open(os.path.join(out, "snd_rom.bin"), "rb").read() +
                                 open(os.path.join(out, "snd_bank.bin"), "rb").read())
@@ -93,7 +96,7 @@ def main():
     try:
         if sound is None:
             raise OSError("no sound program")
-        subprocess.run([sys.executable, os.path.join(HERE, "sound", "effects.py"), fx,
+        subprocess.run(toolpaths.python(os.path.join(HERE, "sound", "effects.py")) + [fx,
                         os.path.join(out, "fx_bank.i")], check=True)
     except (subprocess.CalledProcessError, OSError) as e:
         print("sound: the effects' samples could not be made (%s): none without fast RAM" % e)

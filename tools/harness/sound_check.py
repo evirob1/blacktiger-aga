@@ -19,6 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import bt_rom  # noqa: E402
 import build  # noqa: E402  (vasm helper)
+import toolpaths  # noqa: E402
 
 UNITS = 3579545 / 72            # YM timer units per second
 B = os.path.join(ROOT, "build", "sound")
@@ -45,16 +46,21 @@ def simulate():
     """Translate the sound program, build the test (build/sound/sound_events.s
     written already) and run it: its output lines."""
     os.makedirs(B, exist_ok=True)
-    rom = bt_rom.load_roms(os.path.join(ROOT, "roms", "blktiger.zip"))["audiocpu"]
+    roms = os.environ.get("BT_ROMS") or os.path.join(ROOT, "roms", "blktiger.zip")
+    rom = bt_rom.load_roms(roms)["audiocpu"]
     open(os.path.join(B, "snd_rom.bin"), "wb").write(rom)
-    run([sys.executable, "tools/z80/translate.py", "roms/blktiger.zip", "data/sound_entries.txt",
-         os.path.join(B, "sound_code.s"), os.path.join(B, "report.txt"), "--sound"])
+    run(toolpaths.python(os.path.join(ROOT, "tools", "z80", "translate.py")) +
+        [roms, "data/sound_entries.txt", os.path.join(B, "sound_code.s"), os.path.join(B, "report.txt"),
+         "--sound"])
     run([build.vasm(), "-quiet", "-Fbin", "-m68020", "-Isrc", "-I" + B, "-o",
          os.path.join(B, "sound_test.bin"), "src/sound_test.s"])
-    m = musashi()
-    run(["gcc", "-O2", "-w", "-I" + m, "-o", os.path.join(B, "sound_sim"), "tools/harness/sound_sim.c",
-         m + "/m68kcpu.c", m + "/m68kops.c", m + "/m68kdasm.c", m + "/softfloat/softfloat.c", "-lm"])
-    return subprocess.run([os.path.join(B, "sound_sim"), os.path.join(B, "sound_test.bin")],
+    sim = toolpaths.bundled("sound_sim")   # (the one-file builder brings it)
+    if not sim:
+        m = musashi()
+        sim = os.path.join(B, "sound_sim")
+        run(["gcc", "-O2", "-w", "-I" + m, "-o", sim, "tools/harness/sound_sim.c",
+             m + "/m68kcpu.c", m + "/m68kops.c", m + "/m68kdasm.c", m + "/softfloat/softfloat.c", "-lm"])
+    return subprocess.run([sim, os.path.join(B, "sound_test.bin")],
                           capture_output=True, text=True).stdout.splitlines()
 
 

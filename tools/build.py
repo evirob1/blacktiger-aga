@@ -8,7 +8,6 @@ Output: build/viewer_levelN.adf  (one per level; all 8 by default)
 """
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 
@@ -20,10 +19,8 @@ BSS = 300000
 
 
 def vasm():
-    exe = os.environ.get("VASM") or shutil.which("vasmm68k_mot") or shutil.which("vasmm68k_mot.exe")
-    if not exe:
-        raise SystemExit("vasmm68k_mot not found - put it on your PATH or set VASM=path\\to\\vasmm68k_mot.exe")
-    return exe
+    import toolpaths
+    return toolpaths.vasm()
 
 
 def assemble(src, out, incdir=None, defines=(), extra=()):

@@ -4,6 +4,7 @@ rendering register writes, resampling the result.
 """
 import os
 import subprocess
+import sys
 import tempfile
 
 import numpy as np
@@ -16,7 +17,12 @@ OPERATOR_BASES = (0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90)
 
 
 def renderer():
-    """ymfm (git) and tools/sound/ym_render.cpp (g++) -> the renderer's path."""
+    """ymfm (git) and tools/sound/ym_render.cpp (g++) -> the renderer's path
+    (or the one-file builder's, ready built)."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import toolpaths
+    if toolpaths.bundled("ym_render"):
+        return toolpaths.bundled("ym_render")
     b = os.path.join(ROOT, "build", "sound")
     y = os.path.join(ROOT, "build", "ymfm")
     if not os.path.exists(os.path.join(y, "src", "ymfm_opn.cpp")):

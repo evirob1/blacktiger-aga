@@ -49,8 +49,11 @@ def load_roms(path):
     files = _read_files(path)
     regions = {r: bytearray(s) for r, s in REGION_SIZE.items()}
     missing, bad = [], []
+    by_crc = {zlib.crc32(d): d for d in files.values()}
     for name, (crc, region, off) in ROMS.items():
         data = files.get(name)
+        if data is None or zlib.crc32(data) != crc:
+            data = by_crc.get(crc, data)    # (renamed in some sets: by its CRC)
         if data is None:
             missing.append(name)
             continue

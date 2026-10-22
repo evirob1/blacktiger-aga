@@ -26,7 +26,16 @@ See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and th
 
 ![The viewer running all eight levels](docs/viewer_levels.png)
 
-## Building (Windows, macOS or Linux)
+## Making the disk (players and testers)
+
+Download the disk builder for your computer (`make_disk`, from the Releases
+page), put it in a folder with your own `blktiger.zip` (MAME's ROM set) and run
+it: it writes `BlackTiger.adf` next to the ROM set. Nothing of the game is in
+the builder or in this repository: the disk is made from your ROMs, so please
+don't share it. See [TESTING.md](TESTING.md) for the details, the hardware it
+supports and what to report.
+
+## Building from source (Windows, macOS or Linux)
 
 You need:
 
@@ -55,6 +64,10 @@ The translated game itself:
 python tools/build_game.py       -> build/blacktiger.adf (60 Hz, like the arcade)
 python tools/build_game.py --pal -> 50 Hz version
 ```
+
+The one-file builder: `python tools/package/build_builder.py` -> `dist/make_disk`
+(needs numpy, pyinstaller, gcc, g++, make and git; GitHub Actions builds it for
+Windows, macOS and Linux: `.github/workflows/builder.yml`).
 
 Memory: a stock A1200 (2 MB chip RAM) is enough: the game takes about 1.9 MB
 with sound (1.8 MB without: if there isn't room for sound, the game runs
@@ -87,8 +100,7 @@ handles it). The `--pal` disk stays at 50 Hz, so the game runs at 5/6 speed.
 
 Controls: joystick in port 2 (fire = attack, second button or Space = jump,
 or cursor keys / Ctrl), keyboard **5** = coin, **1** = 1 player start,
-**2** = 2 players. Not there yet: scenery drawn in front of sprites (sprites
-currently always appear on top).
+**2** = 2 players.
 
 Level select (for testing): **F1**-**F8** before starting a game makes it
 start at the beginning of that level (1-8), with the equipment you start the
