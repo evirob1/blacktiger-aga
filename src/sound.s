@@ -249,8 +249,14 @@ ym_write:
 	add.w	d6,d1			; channel 0-5
 	lea	ym_keyon(pc),a0	; bits 0-3: slots on; bit 7: keyed on since
 	lsr.b	#4,d7			; the player last looked (a quick off keeps it:
-	beq.s	.off			; the note still starts)
+	beq.s	.off			; the note still starts). Keyed on while on
+	moveq	#$0f,d2			; already: no new note (the chip ignores it;
+	and.b	(a0,d1.w),d2		; the credit jingle's last note)
+	bne.s	.on
 	or.b	#$80,d7
+.on	move.b	(a0,d1.w),d2
+	and.b	#$80,d2
+	or.b	d2,d7
 	move.b	d7,(a0,d1.w)
 	bra.s	.x
 .off	and.b	#$80,(a0,d1.w)

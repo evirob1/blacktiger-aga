@@ -155,8 +155,8 @@ pv_csig		rs.l	NBUF			; per copper list: wrap line << 16 | pv_textver
 pv_shown	rs.w	1			; buffer on screen
 pv_queued	rs.w	1			; buffer on screen from the next vblank (-1: none)
 pv_qdelay	rs.w	1			; ... from the one after that
-pv_txhalf	rs.w	1			; text rows checked this frame: 0, 7, 14, 21
-pv_palhalf	rs.b	1			; palette half checked this frame
+		rs.w	1
+		rs.b	1
 		rs.b	1
 pv_chgend	rs.l	1			; end of chglist
 pv_bggen	rs.l	1			; background RAM write generation (bg_mark)
@@ -193,7 +193,10 @@ pv_borrowed	rs.b	1			; the last get_slot borrowed a slot
 pv_dbusy	rs.b	1			; the display is in the middle of a frame
 pv_starve	rs.w	1			; vblanks since the display finished a frame
 pv_paldirty	rs.w	1			; copper lists whose palette section is stale (bit per buffer)
-pv_rowpal	rs.b	TXROWS*8		; text palette per row and sprite
+pv_rowpal	rs.b	NBUF*TXROWS*8		; text palette per row and sprite, per buffer
+pv_txspr	rs.l	1			; this buffer's text: sprites (chip RAM),
+pv_txsh		rs.l	1			; ... its characters as drawn,
+pv_rpal		rs.l	1			; ... palettes per row (pv_rowpal)
 pv_rgb		rs.w	256			; background colours, 12 bit (pen 15: backdrop)
 pv_sprgb	rs.w	128			; sprite colours (follows pv_rgb: palettes 16-23)
 pv_txrgb	rs.w	128			; text colours (palette entries $300-$37F)
@@ -847,17 +850,26 @@ init_display:
 	; sprites 2n and 2n+1 cover the same 64 pixels
 	CHIPA	CA_TXSPR,a0
 	moveq	#0,d7
-.sp	move.w	#DISP_Y0,d0
+	moveq	#8-1,d6			; (8 sprites, or 24: two more sets with
+	tst.b	clean_on(pc)		; fast RAM, after the clean background)
+	beq.s	.sp
+	moveq	#24-1,d6
+.sp	cmp.w	#8,d7
+	bne.s	.sp1
+	CHIPA	CA_TXSPR2,a0
+.sp1	move.w	#DISP_Y0,d0
 	move.w	#DISP_Y0+VIEW_H,d1
+	move.w	d7,-(sp)
+	and.w	#7,d7
 	move.w	d7,d2
 	lsr.w	#1,d2
 	lsl.w	#6,d2
 	add.w	#SPR_H0,d2
+	move.w	(sp)+,d7
 	bsr	sprite_ctl
 	lea	TXSPR_SIZE(a0),a0
 	addq.w	#1,d7
-	cmp.w	#8,d7
-	bne.s	.sp
+	dbf	d6,.sp
 	clr.w	pv_vx(a4)
 	clr.w	pv_vy(a4)
 	move.w	#-1,pv_layout(a4)	; forces a full redraw
@@ -990,6 +1002,30 @@ set_buffer:
 	CHIPA	CA_SAVE0,a0
 	add.l	d0,a0
 	move.l	a0,pv_save(a4)
+	moveq	#0,d0			; the text layer: a set of its own for each
+	tst.b	clean_on(pc)		; buffer with fast RAM (room for it: as the
+	beq.s	.tx0			; buffer goes on screen, so does its text),
+	move.w	pv_back(a4),d0		; one shared without
+.tx0	CHIPA	CA_TXSPR,a0
+	tst.w	d0
+	beq.s	.tx1
+	CHIPA	CA_TXSPR2-8*TXSPR_SIZE,a0
+	move.l	d0,-(sp)
+	mulu.w	#8*TXSPR_SIZE,d0
+	add.l	d0,a0
+	move.l	(sp)+,d0
+.tx1	move.l	a0,pv_txspr(a4)
+	lea	txshadow(pc),a0
+	move.l	d0,-(sp)
+	lsl.w	#8,d0
+	lsl.l	#3,d0			; * 2048
+	add.l	d0,a0
+	move.l	a0,pv_txsh(a4)
+	move.l	(sp)+,d0
+	mulu.w	#TXROWS*8,d0
+	lea	pv_rowpal(a4),a0
+	add.l	d0,a0
+	move.l	a0,pv_rpal(a4)
 	move.l	(sp)+,d0
 	rts
 
@@ -1052,18 +1088,18 @@ draw_snapped:				; (tools/harness/amiga_sim.c: BT_SPRFORCE)
 	tst.b	clean_on(pc)
 	bne.s	.clean
 	bsr	restore_bobs
-	bsr	update_palette
+	bsr	update_bg_settled
+	bsr	update_palette		; (as near the background as can be)
 	bsr	update_text
-	bsr	update_background
 	bra.s	.bobs
-.clean	bsr	update_palette
-	bsr	update_text
-	move.w	pv_back(a4),-(sp)	; the clean background, then this buffer's
+.clean	move.w	pv_back(a4),-(sp)	; the clean background, then this buffer's
 	move.w	#NBUF,pv_back(a4)	; objects put back from it (as it is now:
 	bsr	set_buffer		; before, it could still hold a cell that is
-	bsr	update_background	; drawn again with the same tile) and its
+	bsr	update_bg_settled	; drawn again with the same tile) and its
 	move.w	(sp)+,pv_back(a4)	; cells made the same
 	bsr	set_buffer
+	bsr	update_palette
+	bsr	update_text
 	bsr	restore_bobs
 	bsr	sync_clean
 .bobs	bsr	draw_bobs
@@ -1150,6 +1186,7 @@ read_inputs:
 	Z80	ZF3C1,$f3c1		; (player 1's record)
 	Z80	ZF3E1,$f3e1		; (player 2's)
 	Z80	ZF3AC,$f3ac		; weapon (0-4: what the shop sells)
+	Z80	ZF407,$f407		; player 1's vertical speed (negative: up)
 	Z80	ZF3B0,$f3b0		; potions
 	Z80	ZF3B1,$f3b1		; time: seconds, BCD
 	Z80	ZF3B2,$f3b2		; minutes
@@ -1207,7 +1244,12 @@ test_mode:
 	move.w	d0,pv_ctime(a4)
 .on	tst.b	pv_cheat(a4)
 	beq.s	.x
-	cmp.b	#4,(ZF3AC,a0)		; the strongest weapon
+	btst	#5,pv_in1(a4)		; jump held while rising: no gravity (as
+	bne.s	.nj			; high as it is held - to reach a ledge;
+	tst.b	(ZF407,a0)		; $F407: the player's vertical speed)
+	bpl.s	.nj
+	move.b	#-5,(ZF407,a0)
+.nj	cmp.b	#4,(ZF3AC,a0)		; the strongest weapon
 	bhs.s	.wp
 	move.b	#4,(ZF3AC,a0)
 .wp	tst.b	(ZF3B0,a0)		; a potion: a poison attack uses it up
@@ -1238,19 +1280,12 @@ test_mode:
 
 ;------------------------------------------------------------------------------
 ; text layer: arcade rows 2-29 into the sprites. Rows are compared with the
-; shadow copy 4 bytes at a time (a quarter of them each frame); a changed row is
-; drawn again in full.
+; shadow copy 4 bytes at a time; a changed row is drawn again in full (into
+; this buffer's sprites, as for its bitmap, with fast RAM).
 update_text:
-	lea	txshadow(pc),a3
-	move.w	pv_txhalf(a4),d5	; a quarter of the rows per frame
-	move.w	d5,d4
-	add.w	#TXROWS/4,d4
-	cmp.w	#TXROWS,d4
-	blo.s	.h
-	moveq	#0,d4
-.h	move.w	d4,pv_txhalf(a4)
-	move.w	d5,d4
-	add.w	#TXROWS/4,d4		; end
+	move.l	pv_txsh(a4),a3
+	moveq	#0,d5			; every row, each frame (the story page's
+	moveq	#TXROWS,d4		; lightning is 500 characters at once)
 .row	move.w	d5,d0
 	addq.w	#2,d0
 	lsl.w	#5,d0			; first cell of the row
@@ -1288,13 +1323,14 @@ draw_row:
 	move.w	d5,d0
 	addq.w	#2,d0
 	lsl.w	#5,d0
-	lea	txshadow(pc),a3
+	move.l	pv_txsh(a4),a3
 	add.w	d0,a3			; the row's codes, attributes at +$400
-	lea	pv_rowpal(a4),a1
+	move.l	pv_rpal(a4),a1
 	move.w	d5,d0
 	lsl.w	#3,d0
 	add.w	d0,a1
-	CHIPA	CA_TXSPR+16,a2		; block 0, even sprite, this row
+	move.l	pv_txspr(a4),a2		; block 0, even sprite, this row
+	lea	16(a2),a2
 	move.w	d5,d0
 	lsl.w	#7,d0			; 8 lines x 16 bytes
 	add.w	d0,a2
@@ -1516,6 +1552,20 @@ update_background:
 	bsr	bg_draw
 	bra.s	.c
 .x	rts
+
+; the background, again (twice at most) while the game wrote to it meanwhile:
+; the display runs when the game is idle, and when it falls behind, a frame of
+; the game can start in the middle of the scan - a change drawn in two halves
+; (the lightning on the story page)
+update_bg_settled:
+	moveq	#2,d0
+.again	move.w	d0,-(sp)
+	bsr	update_background
+	move.w	(sp)+,d0
+	move.l	pv_bggen(a4),d1
+	cmp.l	pv_scangen(a4),d1
+	dbeq	d0,.again
+	rts
 
 ; -> d6 = first visible map row (not wrapped), d7 = rows - 1
 view_rows:
@@ -2598,17 +2648,13 @@ COPMOVE	macro
 	Z80	ZDFFC,$dffc
 update_palette:
 	lea	palshadow(pc),a3
-	moveq	#0,d2			; anything changed?
-	not.b	pv_palhalf(a4)		; half of it each frame
-	beq.s	.h2
-	lea	(ZD800,a5),a0		; background, low bytes
-	moveq	#64-1,d1
+	moveq	#0,d2			; anything changed? (all of it each frame:
+	lea	(ZD800,a5),a0		; the story page flashes it every frame)
+	moveq	#64-1,d1		; background, low bytes
 	bsr.s	.cmp
 	lea	(ZDC00,a5),a0		; background, high bytes
 	moveq	#64-1,d1
 	bsr.s	.cmp
-	bra.s	.hx
-.h2	lea	512(a3),a3
 	lea	(ZDA00,a5),a0		; sprites
 	moveq	#32-1,d1
 	bsr.s	.cmp
@@ -2803,8 +2849,7 @@ build_copper:
 	bne.s	.sset
 	move.w	d7,d1
 	mulu.w	#TXSPR_SIZE,d1
-	CHIPA	CA_TXSPR,a3
-	add.l	a3,d1
+	add.l	pv_txspr(a4),d1
 .sset	move.w	d3,(a0)+
 	swap	d1
 	move.w	d1,(a0)+
@@ -2870,7 +2915,7 @@ build_copper:
 .c	cmp.w	cop_wrest(pc),d3
 	bne.s	.d
 	bsr	cop_modrest
-.d	lea	pv_rowpal(a4),a2	; colours 241-243, ... (even sprites),
+.d	move.l	pv_rpal(a4),a2		; colours 241-243, ... (even sprites),
 	move.w	d5,d0			; 225-227, ... (odd sprites)
 	lsl.w	#3,d0
 	add.w	d0,a2
@@ -3010,8 +3055,9 @@ CHIPA_SIZE	equ	CA_SAVE0+NBUF*SAVESIZE
 ; with fast RAM (a chip RAM block of their own) no save areas: a clean copy of
 ; the background instead (clean_on), sprites restored from it
 CA_CLEAN	equ	CA_SAVE0
-	ifgt	BMSIZE-NBUF*SAVESIZE
-CHIPA_FAST	equ	CA_CLEAN+BMSIZE
+CA_TXSPR2	equ	CA_CLEAN+BMSIZE		; buffers 1 and 2's text sprites
+	ifgt	BMSIZE+16*TXSPR_SIZE-NBUF*SAVESIZE
+CHIPA_FAST	equ	CA_TXSPR2+16*TXSPR_SIZE
 	else
 CHIPA_FAST	equ	CHIPA_SIZE
 	endif
@@ -3045,7 +3091,7 @@ task_stacks	equ	bgram+16384
 bgshadow0	equ	task_stacks+16*1024	; NBUF background shadows (+ the clean one)
 rec0		equ	bgshadow0+(NBUF+1)*SHSIZE	; NBUF object lists
 txshadow	equ	rec0+NBUF*RECSIZE
-palshadow	equ	txshadow+2048		; 1032 bytes
+palshadow	equ	txshadow+NBUF*2048	; 1032 bytes
 snd_rt		equ	palshadow+1032+8	; the sound CPU's runtime (src/sound.s)
 ym_regs		equ	snd_rt+((RT_SIZE+3)&-4)
 ym_keyon	equ	ym_regs+512
