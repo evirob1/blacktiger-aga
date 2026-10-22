@@ -39,6 +39,15 @@ jobs:
       - name: Python packages
         run: python -m pip install numpy pyinstaller
 
+      - name: Sources fetched before (vasm, Musashi, ymfm)
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/package/vasm
+            build/musashi
+            build/ymfm
+          key: sources-${{ runner.os }}-1
+
       - name: MinGW (Windows)
         if: runner.os == 'Windows'
         id: msys2

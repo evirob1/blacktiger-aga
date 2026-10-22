@@ -22,7 +22,10 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 WORK = os.path.join(ROOT, "build", "package")
 BIN = os.path.join(WORK, "bin")
 EXE = ".exe" if os.name == "nt" else ""
-VASM_URL = "http://sun.hasenbraten.de/vasm/release/vasm.tar.gz"
+# vasm's source: its home, else a mirror on GitHub (the home is sometimes down)
+VASM_URLS = ["http://sun.hasenbraten.de/vasm/release/vasm.tar.gz",
+             "https://sun.hasenbraten.de/vasm/release/vasm.tar.gz"]
+VASM_GIT = "https://github.com/mbitsnbites/vasm-mirror.git"
 
 
 def run(cmd, **kw):
@@ -39,17 +42,29 @@ def vasm():
     src = os.path.join(WORK, "vasm")
     if not os.path.exists(os.path.join(src, "Makefile")):
         tgz = os.path.join(WORK, "vasm.tar.gz")
-        try:
-            urllib.request.urlretrieve(VASM_URL, tgz)
-        except OSError as e:                # (no network: the one installed, if any)
+        got = False
+        for url in VASM_URLS:
+            try:
+                urllib.request.urlretrieve(url, tgz)
+                with tarfile.open(tgz) as t:
+                    t.extractall(WORK)
+                got = True
+                break
+            except (OSError, tarfile.TarError) as e:
+                print("vasm from %s: %s" % (url, e))
+        if not got:
+            try:
+                run(["git", "clone", "-q", "--depth", "1", VASM_GIT, src])
+                got = True
+            except (OSError, RuntimeError) as e:
+                print("vasm from %s: %s" % (VASM_GIT, e))
+        if not got:                         # (no network: the one installed, if any)
             have = shutil.which("vasmm68k_mot" + EXE)
             if not have:
-                raise
-            print("vasm source not reachable (%s): using %s" % (e, have))
+                raise SystemExit("vasm's source could not be fetched")
+            print("using the installed %s" % have)
             shutil.copy(have, BIN)
             return
-        with tarfile.open(tgz) as t:
-            t.extractall(WORK)
     run(["make", "CPU=m68k", "SYNTAX=mot"] + (["CC=gcc", "LD=gcc"] if os.name == "nt" else []), cwd=src)
     shutil.copy(os.path.join(src, "vasmm68k_mot" + EXE), BIN)
 
