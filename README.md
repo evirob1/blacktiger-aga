@@ -24,7 +24,7 @@ set). Please don't distribute the built disk images.
 
 See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and the roadmap.
 
-![The viewer running all eight levels](docs/viewer_levels.png)
+![The game on the Amiga 1200: all eight rounds](docs/screenshots.png)
 
 ## Making the disk (players and testers)
 
