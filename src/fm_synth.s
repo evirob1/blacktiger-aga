@@ -23,14 +23,15 @@ SY_BUFSIZE	equ	4*2*SY_CHUNK
 ; YM timer units (72 YM clocks) per chunk, << 8 (as src/sound_play.s's UNITS_CHUNK)
 SY_UNITSCHUNK	equ	132279		; (SY_CHUNK * SY_PERIOD = CHUNK * PERIOD there)
 ; phase steps: the chip's (10.10, per FM sample at clock / 72) scaled to ours,
-; for a phase with the 10-bit sine index in its top bits
+; for a phase with the 10-bit sine index in bits 16-25 (<< 22, then >> 6)
 SY_STEPK	equ	14698			; 4096 * (3579545 / 72) / 13855
 ; envelope clocks (every third FM sample) per output sample, << 16
 SY_ECLK		equ	78374			; 65536 * 49716 / 13855 / 3
 ; SSG steps (a cycle = 1 << 32): (clock / 32 / period) / 13855, << 28
 SY_SSGK		equ	2167400000		; (3579545 / 32) / 13855 * (1 << 28)
 SY_GAIN		equ	9744			; the mix -> 16 bits (<< 12): MAME's level, -3 dB
-SY_SUB		equ	36			; samples at most between envelope steps
+SY_SUB		equ	72			; samples at most between envelope steps
+SY_ENVMIN	equ	24			; envelope clocks at least a step (20 samples)
 
 	rsreset				; an operator
 OP_PHASE	rs.l	1
@@ -73,6 +74,7 @@ SY_EXP		rs.w	8192		; attenuation -> volume
 SY_CH		rs.b	6*CH_SIZE
 SY_SG		rs.b	6*SG_SIZE
 SY_MIX		rs.w	SY_CHUNK	; the chunk being made
+SY_NBUF		rs.b	SY_CHUNK	; sy_ssg: a chip's noise for the segment
 SY_NOISE	rs.l	2		; per chip: LFSR
 SY_NPHASE	rs.l	2		; per chip: noise clock phase
 SY_NSTEP	rs.l	2
@@ -452,6 +454,7 @@ sy_params:
 .m	mulu.l	d7,d2
 	lsr.l	#1,d2
 	mulu.l	#SY_STEPK,d2		; (the phase wraps: its high bits go)
+	lsr.l	#6,d2
 	move.l	d2,OP_STEP(a0)
 	moveq	#$7f,d7			; total level << 3
 	and.b	$40(a2,d4.w),d7
@@ -586,7 +589,11 @@ sy_envelopes:
 	mulu.w	#SY_ECLK>>4,d0		; (clocks << 12)
 	lsl.l	#4,d0
 	add.l	d0,d1
-	move.l	d1,d0
+	cmp.l	#SY_ENVMIN<<16,d1	; (a few at least: short segments add up)
+	bhs.s	.go0
+	move.l	d1,SY_ENVF(a5)
+	rts
+.go0	move.l	d1,d0
 	clr.w	d0			; whole clocks << 16
 	sub.l	d0,d1
 	move.l	d1,SY_ENVF(a5)
@@ -605,7 +612,11 @@ sy_envelopes:
 	bne.s	.go
 	cmp.b	#ST_RELEASE,d1
 	beq	.skip
-.go	cmp.b	#ST_ATTACK,d1
+.go	cmp.b	#ST_SUSTAIN,d1		; (sustained at rate 0: none either)
+	bne.s	.go2
+	tst.b	OP_RATE+ST_SUSTAIN(a0)
+	beq	.done
+.go2	cmp.b	#ST_ATTACK,d1
 	bne.s	.na
 	tst.l	d2			; attack done -> decay
 	bne.s	.at
@@ -727,8 +738,7 @@ SY_NEXT	macro
 ; \3 = its offset in the channel, result -> \4. Uses d4.
 SY_OP	macro
 	move.l	\1,d4
-	swap	d4
-	lsr.w	#6,d4			; the 10-bit sine index
+	swap	d4			; the 10-bit sine index (and junk above)
 	ifnc	"\2",""
 	add.w	\2,d4
 	endif
@@ -876,24 +886,32 @@ sy_alg7:				; O1 + O2 + O3 + O4
 	SY_NEXT	.l
 
 ; the SSG's six channels into the mix (d7 samples at a4): each a square wave
-; +- its level, gated by the noise
+; +- its level, gated by the noise (per chip: its bits for the segment first)
 sy_ssg:
 	moveq	#0,d6			; chip
 .chip	lea	SY_SG(a5),a0
 	move.w	d6,d0
 	mulu.w	#3*SG_SIZE,d0
 	add.w	d0,a0
-	move.w	SG_VOL(a0),d0		; (all silent: nothing to add)
-	or.w	SG_VOL+SG_SIZE(a0),d0
-	or.w	SG_VOL+2*SG_SIZE(a0),d0
-	beq	.nx
-	move.l	a4,a1
+	moveq	#0,d0			; any channel heard with noise?
+	moveq	#3-1,d1
+	move.l	a0,a2
+.w	tst.w	SG_VOL(a2)
+	beq.s	.w1
+	btst	#1,SG_MODE+1(a2)
+	beq.s	.w1
+	moveq	#1,d0
+.w1	lea	SG_SIZE(a2),a2
+	dbf	d1,.w
+	tst.w	d0
+	beq.s	.nn
+	lea	SY_NBUF(a5),a1		; the noise: a byte a sample, -1 = on
 	move.w	d7,d5
 	subq.w	#1,d5
 	move.l	SY_NOISE(a5,d6.w*4),d3
 	move.l	SY_NPHASE(a5,d6.w*4),d4
 	move.l	SY_NSTEP(a5,d6.w*4),a3
-.s	add.l	a3,d4			; noise: an LFSR step per period
+.ns	add.l	a3,d4			; an LFSR step per period
 	bcc.s	.nq
 	move.l	d3,d0			; (17 bits: bit 0 ^ bit 3 in at the top)
 	lsr.l	#3,d0
@@ -904,31 +922,66 @@ sy_ssg:
 	add.l	d0,d0
 	eor.l	d0,d3
 	lsr.l	#1,d3
-.nq	moveq	#0,d2			; this sample's SSG
-	moveq	#3-1,d1
-	move.l	a0,a2
-.c	move.w	SG_VOL(a2),d0
-	beq.s	.cn
-	move.l	SG_STEP(a2),d0
-	add.l	d0,SG_PHASE(a2)
-	btst	#0,SG_MODE+1(a2)	; tone: on in the first half of a cycle
-	beq.s	.tn
-	tst.b	SG_PHASE(a2)
-	bmi.s	.off
-.tn	btst	#1,SG_MODE+1(a2)	; noise: on while its bit is
-	beq.s	.on
-	btst	#0,d3
-	beq.s	.off
-.on	add.w	SG_VOL(a2),d2
-	bra.s	.cn
-.off	sub.w	SG_VOL(a2),d2
-.cn	lea	SG_SIZE(a2),a2
-	dbf	d1,.c
-	add.w	d2,(a1)+
-	dbf	d5,.s
+.nq	moveq	#1,d0
+	and.w	d3,d0
+	neg.b	d0
+	move.b	d0,(a1)+
+	dbf	d5,.ns
 	move.l	d3,SY_NOISE(a5,d6.w*4)
 	move.l	d4,SY_NPHASE(a5,d6.w*4)
-.nx	addq.w	#1,d6
+.nn	moveq	#3-1,d1			; each channel heard
+	move.l	a0,a2
+.ch	move.w	SG_VOL(a2),d2
+	beq	.cn
+	move.l	a4,a1
+	lea	SY_NBUF(a5),a3
+	move.w	d7,d5
+	subq.w	#1,d5
+	move.l	SG_PHASE(a2),d3
+	move.l	SG_STEP(a2),d4
+	move.w	SG_MODE(a2),d0
+	subq.w	#1,d0
+	beq.s	.tone
+	subq.w	#1,d0
+	beq.s	.noise
+	subq.w	#1,d0
+	beq.s	.both
+.const	add.w	d2,(a1)+		; neither: always on
+	dbf	d5,.const
+	bra.s	.skip
+.noise	tst.b	(a3)+
+	beq.s	.n0
+	add.w	d2,(a1)+
+	dbf	d5,.noise
+	bra.s	.skip
+.n0	sub.w	d2,(a1)+
+	dbf	d5,.noise
+.skip	move.l	d4,d0			; (the tone moves on all the same)
+	mulu.l	d7,d0
+	add.l	d0,d3
+	bra.s	.cd
+.tone	add.l	d4,d3			; on in the first half of a cycle
+	bmi.s	.t0
+	add.w	d2,(a1)+
+	dbf	d5,.tone
+	bra.s	.cd
+.t0	sub.w	d2,(a1)+
+	dbf	d5,.tone
+	bra.s	.cd
+.both	add.l	d4,d3
+	bmi.s	.b0
+	tst.b	(a3)+
+	beq.s	.b1
+	add.w	d2,(a1)+
+	dbf	d5,.both
+	bra.s	.cd
+.b0	addq.l	#1,a3
+.b1	sub.w	d2,(a1)+
+	dbf	d5,.both
+.cd	move.l	d3,SG_PHASE(a2)
+.cn	lea	SG_SIZE(a2),a2
+	dbf	d1,.ch
+	addq.w	#1,d6
 	cmp.w	#2,d6
 	bne	.chip
 	rts

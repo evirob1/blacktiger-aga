@@ -77,7 +77,7 @@ itself always runs at full speed: sound costs display frames.
 On a 68040 or 68060 with fast RAM the two YM2203s are synthesised instead, in
 real time (src/fm_synth.s: FM operators, envelopes and the SSG as the chips do
 them, after ymfm; 13.9 kHz, 14-bit output): much closer to the arcade, at
-about 3.5 million instructions a second. **F10** switches between that and the
+about 3 million instructions a second. **F10** switches between that and the
 sampled player (on any CPU with fast RAM: try it on a fast 68030 too).
 
 The default disk switches the A1200 to NTSC timing (60 Hz, 262 lines), the
