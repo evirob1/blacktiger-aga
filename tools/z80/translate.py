@@ -806,8 +806,9 @@ def main():
     probs = sorted(set(tr.problems))
     if rep:
         open(rep, "w").write("\n".join(probs) + "\n")
+    real = [p for p in probs if not p.startswith("note:")]     # (notes: as designed)
     print("%d instructions translated, %d problems%s" %
-          (len(cm.insns), len(probs), (" (see %s)" % rep) if rep else ""))
+          (len(cm.insns), len(real), (" (see %s)" % rep) if rep and real else ""))
 
 
 if __name__ == "__main__":

@@ -77,8 +77,7 @@ JIT is fine.
   (68040/060).
 * **F1–F8** before starting a game: start at that level.
 * **Help**: test mode on/off. You get the strongest weapon, no damage, and
-  lives and time never run out. Holding jump while rising keeps you rising,
-  to reach ledges you can't otherwise. Nothing on screen shows that it's on.
+  lives and time never run out. Nothing on screen shows that it's on.
 
 ## What's as the arcade (not bugs)
 

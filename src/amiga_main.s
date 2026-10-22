@@ -1186,7 +1186,6 @@ read_inputs:
 	Z80	ZF3C1,$f3c1		; (player 1's record)
 	Z80	ZF3E1,$f3e1		; (player 2's)
 	Z80	ZF3AC,$f3ac		; weapon (0-4: what the shop sells)
-	Z80	ZF407,$f407		; player 1's vertical speed (negative: up)
 	Z80	ZF3B0,$f3b0		; potions
 	Z80	ZF3B1,$f3b1		; time: seconds, BCD
 	Z80	ZF3B2,$f3b2		; minutes
@@ -1244,12 +1243,7 @@ test_mode:
 	move.w	d0,pv_ctime(a4)
 .on	tst.b	pv_cheat(a4)
 	beq.s	.x
-	btst	#5,pv_in1(a4)		; jump held while rising: no gravity (as
-	bne.s	.nj			; high as it is held - to reach a ledge;
-	tst.b	(ZF407,a0)		; $F407: the player's vertical speed)
-	bpl.s	.nj
-	move.b	#-5,(ZF407,a0)
-.nj	cmp.b	#4,(ZF3AC,a0)		; the strongest weapon
+	cmp.b	#4,(ZF3AC,a0)		; the strongest weapon
 	bhs.s	.wp
 	move.b	#4,(ZF3AC,a0)
 .wp	tst.b	(ZF3B0,a0)		; a potion: a poison attack uses it up
