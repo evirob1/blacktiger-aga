@@ -27,7 +27,12 @@ VASM_URL = "http://sun.hasenbraten.de/vasm/release/vasm.tar.gz"
 
 def run(cmd, **kw):
     print("+", " ".join(cmd))
-    subprocess.run(cmd, check=True, **kw)
+    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    if r.returncode:
+        tail = (r.stdout + r.stderr).strip().splitlines()[-8:]
+        raise RuntimeError("%s failed (%d): %s" % (" ".join(cmd[:3]), r.returncode, " | ".join(tail)))
 
 
 def vasm():
@@ -93,4 +98,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as e:              # (on GitHub: an annotation, readable without the log)
+        if os.environ.get("GITHUB_ACTIONS"):
+            import traceback
+            last = traceback.format_exc().strip().splitlines()[-6:]
+            print("::error title=build_builder::%s" % " | ".join(last).replace("%", "%25"))
+        raise
