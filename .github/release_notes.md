@@ -15,3 +15,12 @@ It runs on a stock A1200 (sound effects only), better with fast RAM (music and
 effects), and on a 68040/68060 with fast RAM the arcade's sound chips are
 synthesised in real time. Read [TESTING.md](https://github.com/evirob1/blacktiger-aga/blob/main/TESTING.md)
 for the ROM set's files, the hardware, the controls and what to report.
+
+**New in v0.2**
+
+* 68040 / 68060: switching to the sampled sound with F10 no longer turns the
+  CPU's caches off (the game slowed down from then on).
+* The display does less work each frame: a little smoother in busy scenes,
+  most of all on a stock A1200.
+
+Make a new disk with this version's builder: disks made with v0.1 don't change.
