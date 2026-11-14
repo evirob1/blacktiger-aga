@@ -601,6 +601,7 @@ MIX_STEP macro	; n, where (its add.l #imm), or a register
 	else
 	lea	\2+2(pc),a6
 	move.l	d3,(a6)
+	bsr	mix_flush
 	endc
 	endm
 MIX_OUT	macro	; n, pn
@@ -615,8 +616,12 @@ MIX_ADD	macro	; op (move/add), an, vn, pn, step
 	addx.w	d6,\4
 	endm
 CACHE_CLEAR macro			; (the instruction cache: the steps written)
-	moveq	#9,d3			; (enable, clear)
+	moveq	#-$78,d3		; 68020 / 68030: enable, clear. (A 68040 /
+	and.b	cpu_flags(pc),d3	; 68060 has other bits there - this would
+	bne.s	.cc\@			; turn its caches off: mix_flush instead)
+	moveq	#9,d3
 	movec	d3,cacr
+.cc\@
 	endm
 
 .one	MIX_IN	0,a0,a1,d0
@@ -676,6 +681,20 @@ CACHE_CLEAR macro			; (the instruction cache: the steps written)
 	MIX_OUT	1,d1
 	MIX_OUT	2,d2
 	bra	.next
+
+; a6 = a step just written into the code: on a 68040 / 68060 its cache
+; lines (the long may lie across two) are invalidated. Keeps the registers
+; but a6.
+mix_flush:
+	move.l	d3,-(sp)
+	moveq	#-$78,d3
+	and.b	cpu_flags(pc),d3
+	beq.s	.x
+	dc.w	$f48e			; cinvl ic,(a6)
+	addq.l	#3,a6
+	dc.w	$f48e
+.x	move.l	(sp)+,d3
+	rts
 
 ; attenuation (TL steps of 0.75 dB) -> volume 0-64
 att_vols:

@@ -52,7 +52,7 @@ The same disk adapts to the machine it boots on:
 | machine | what you get |
 |---|---|
 | A1200, 2 MB chip RAM, no fast RAM | Game at full speed. Sound effects as samples (plus the credit jingle and the story tune); no other music. Busy scenes drop display frames. |
-| A1200 + fast RAM (any 4 MB or more) | Music and effects: the arcade's sound program runs, with its FM instruments played as samples. Smoother display. |
+| A1200 + fast RAM (any 4 MB or more) | Music and effects: the arcade's sound program runs, with its FM instruments played as samples. With an accelerator (68030 or better) the display is smoother too; with a RAM card alone the music takes some of the 68020's time (**F9** turns it off). |
 | 68040 / 68060 + fast RAM | As above, but the two YM2203 sound chips are synthesised in real time: much closer to the arcade. **F10** switches back to the sampled sound if it costs too many frames. |
 | piStorm (Emu68), Vampire, other | Untested: please report! |
 

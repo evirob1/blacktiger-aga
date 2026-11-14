@@ -13,12 +13,12 @@ set). Please don't distribute the built disk images.
 |---|---|
 | ROM loading and CRC check, graphics decoding (tiles, sprites, text) | done |
 | Level maps and palettes extracted straight from ROM (all 8 levels) | done |
-| AGA scrolling engine: 8 bitplanes, 256 colours, 50 fps 2-way scrolling | done, pixel-exact against a reference render |
-| Main game code: Z80 → 68020 translator and runtime | working: 3,000 frames of attract mode and play match MAME byte for byte (see [docs/TRANSLATOR.md](docs/TRANSLATOR.md)) |
-| Translated game on the A1200: background, sprites, text layer, palette, joystick, keyboard | working (`build/blacktiger.adf`): game logic at full speed; the display drops to 25 fps on busy screens |
-| Game sprites (player, enemies, shots) | done: blitter objects, double buffered; matches a MAME-style reference render |
+| AGA scrolling engine: 8 bitplanes, 256 colours, scrolling in every direction, 60 Hz as the arcade (50 Hz PAL disk optional) | done, pixel-exact against a reference render |
+| Main game code: Z80 → 68020 translator and runtime | working: 6,000 frames of attract mode and play match MAME byte for byte (see [docs/TRANSLATOR.md](docs/TRANSLATOR.md)) |
+| Translated game on the A1200: background, sprites, text layer, palette, joystick, keyboard | working (`build/blacktiger.adf`): game logic at full speed; on a stock A1200 the display drops frames on busy screens |
+| Game sprites (player, enemies, shots) | done: blitter objects, triple buffered; matches a MAME-style reference render |
 | Background priority (scenery in front of sprites) | done: the front pens of background palettes 0-5 redrawn over the objects (MAME's split table) |
-| Code coverage of later levels | in progress: code the recordings never reached stops with a red screen |
+| Code coverage of later levels | all eight levels played through to the ending; code never seen would stop with a red screen that says where |
 | Sound | the arcade's sound program translated (its YM2203 register writes match MAME exactly), played through a software mixer of sampled FM instruments and SSG tones, or (68040 / 68060) the chips synthesised in real time; effects as samples on a stock A1200 |
 | WHDLoad/HD install | planned |
 

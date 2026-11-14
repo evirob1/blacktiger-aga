@@ -205,6 +205,10 @@ pv_keys		rs.b	128
 pv_sprbuf	rs.b	4*NSPR			; sprite RAM, buffered on out ($06)
 pv_sprsnap	rs.b	4*NSPR			; the copy being drawn
 pv_fmark	rs.b	16*NCOLSLOT		; front_cells: cells done this frame
+pv_vis		rs.b	NSPR			; list_sprites: the sprites on screen,
+pv_nvis		rs.w	1			; ... how many,
+pv_visleft	rs.w	1			; ... draw_bobs: still to plan
+pv_sprpals	rs.l	1			; ... the palettes of those on screen
 pv_size		rs.b	0
 
 ;------------------------------------------------------------------------------
@@ -490,8 +494,10 @@ plat_out:
 	ori.w	#$0700,sr
 	lea	(ZFE00,a6),a2
 	lea	pv_sprbuf(a0),a0
-	moveq	#NSPR-1,d0
-.c	move.l	(a2)+,(a0)+
+	moveq	#NSPR/8-1,d0
+.c	rept	8
+	move.l	(a2)+,(a0)+
+	endr
 	dbf	d0,.c
 	move.w	(sp)+,sr
 	movem.l	(sp)+,d0/a2
@@ -1067,8 +1073,10 @@ draw_frame:
 	st	pv_dbusy(a4)
 	lea	pv_sprbuf(a4),a0	; with the I/O registers of the same moment
 	lea	pv_sprsnap(a4),a2	; (scroll, layout, video enables)
-	moveq	#NSPR-1,d0
-.sn	move.l	(a0)+,(a2)+
+	moveq	#NSPR/8-1,d0
+.sn	rept	8
+	move.l	(a0)+,(a2)+
+	endr
 	dbf	d0,.sn
 draw_snapped:				; (tools/harness/amiga_sim.c: BT_SPRFORCE)
 	move.l	pv_io(a4),pv_iod(a4)
@@ -1084,6 +1092,7 @@ draw_snapped:				; (tools/harness/amiga_sim.c: BT_SPRFORCE)
 	bra.s	.fb
 .fr	move.w	d0,pv_back(a4)
 	move.w	#$2000,sr
+	bsr	list_sprites
 	bsr	set_buffer
 	tst.b	clean_on(pc)
 	bne.s	.clean
@@ -1285,16 +1294,16 @@ update_text:
 	lsl.w	#5,d0			; first cell of the row
 	lea	(ZD000,a5,d0.w),a0
 	lea	(a3,d0.w),a2
-	moveq	#7,d1
-.cc	cmpm.l	(a0)+,(a2)+
+	rept	8
+	cmpm.l	(a0)+,(a2)+
 	bne.s	.chg
-	dbf	d1,.cc
+	endr
 	lea	(ZD400,a5,d0.w),a0
 	lea	$400(a3,d0.w),a2
-	moveq	#7,d1
-.ca	cmpm.l	(a0)+,(a2)+
+	rept	8
+	cmpm.l	(a0)+,(a2)+
 	bne.s	.chg
-	dbf	d1,.ca
+	endr
 	bra.s	.same
 .chg	lea	(ZD000,a5,d0.w),a0	; copy the row, then draw it from the copy
 	lea	(a3,d0.w),a2
@@ -1822,30 +1831,12 @@ bg_mark_blk:
 	movem.l	(sp)+,d0-d1
 	rts
 
-; sprite palettes on screen -> d5, then pv_used (before any slot is given out)
+; sprite palettes on screen (list_sprites) -> d5, then pv_used (before any
+; slot is given out)
 mark_sprites:
 	btst	#2,pv_iod+$c(a4)		; sprites off?
 	bne.s	.x
-	lea	pv_sprsnap(a4),a0
-	moveq	#NSPR-1,d7
-.s	move.b	2(a0),d0		; y
-	beq.s	.n
-	cmp.b	#240,d0
-	bhs.s	.n
-	moveq	#0,d1
-	move.b	1(a0),d1
-	moveq	#0,d2
-	move.b	3(a0),d2
-	btst	#4,d1
-	beq.s	.xp
-	sub.w	#256,d2
-.xp	cmp.w	#-15,d2
-	blt.s	.n
-	and.w	#7,d1
-	add.w	#16,d1
-	bset	d1,d5
-.n	addq.l	#4,a0
-	dbf	d7,.s
+	or.l	pv_sprpals(a4),d5
 .x	move.l	d5,pv_used(a4)
 	rts
 
@@ -2095,15 +2086,18 @@ sync_clean:
 .pass	move.l	pv_sh(a4),a2
 	lea	bgshadow0+NBUF*SHSIZE(pc),a3	; (the clean shadow is the last)
 	moveq	#0,d5			; buffer slot
-	moveq	#0,d2			; column slot * 4
-	move.w	#16*NCOLSLOT-1,d7
 	bsr	blit_setup
 	move.w	#LINEB-2,BLTAMOD(a6)
 	move.w	#$09f0,BLTCON0(a6)
 	bclr	#31,d4			; (anything forgotten in this pass)
-.e	move.l	(a3)+,d0
-	cmp.l	(a2)+,d0
-	beq.s	.n
+.row	moveq	#NCOLSLOT-1,d7		; (column slots left in the row - 1)
+.e	cmpm.l	(a3)+,(a2)+
+	dbne	d7,.e
+	beq	.rd			; (the rest of the row the same)
+	moveq	#NCOLSLOT-1,d2
+	sub.w	d7,d2
+	lsl.w	#2,d2			; column slot * 4
+	move.l	-4(a3),d0
 	move.l	d0,-4(a2)
 	cmp.l	#-1,d0
 	beq.s	.n
@@ -2128,12 +2122,10 @@ sync_clean:
 	dbf	d6,.p
 	lsr.w	#1,d1			; its 16 lines cover part of a column held
 	bsr.s	sync_forget		; a slot up or down (as bg_draw)
-.n	addq.w	#4,d2
-	cmp.w	#NCOLSLOT*4,d2
-	bne.s	.c
-	moveq	#0,d2
-	addq.w	#1,d5
-.c	dbf	d7,.e
+.n	dbf	d7,.e
+.rd	addq.w	#1,d5
+	cmp.w	#16,d5
+	bne	.row
 	tst.l	d4			; forgotten some: again (they are copied too)
 	dbpl	d4,.pass
 	rts
@@ -2262,14 +2254,17 @@ draw_bobs:
 	btst	#2,pv_iod+$c(a4)		; sprites off?
 	bne	.x
 	bsr	blit_wait		; (flipbuf is free again)
-	bsr	bob_cutoff
 	move.l	pv_rec(a4),a2
 	CHIPA	CA_FLIPBUF,a3
 	moveq	#0,d7			; objects
 	clr.w	pv_saverows(a4)
-	moveq	#NSPR-1,d6
-.spr	cmp.w	pv_bobcut(a4),d6	; (no room for it: lower priority)
-	bhs	.next
+	move.w	pv_nvis(a4),d6		; the sprites on screen (list_sprites), the
+	beq	.planned		; last first
+	move.w	d6,pv_visleft(a4)
+	lea	pv_vis(a4),a5
+	add.w	d6,a5
+.spr	moveq	#0,d6
+	move.b	-(a5),d6
 	lea	pv_sprsnap(a4),a0
 	lea	(a0,d6.w*4),a0
 	moveq	#0,d5
@@ -2378,10 +2373,13 @@ draw_bobs:
 	move.w	d2,(a2)+
 	addq.w	#1,d7
 .next	cmp.w	#2*MAXBOB-1,d7		; (room for MAXBOB sprites)
-	dbhs	d6,.spr
+	bhs.s	.planned
+	subq.w	#1,pv_visleft(a4)
+	bne	.spr
 	bra.s	.planned
 .full	subq.l	#4,a2			; (REC_DEST written already)
 .planned
+	lea	z80mem+$8000(pc),a5
 	move.w	pv_back(a4),d0
 	lea	pv_nrec(a4),a0
 	move.w	d7,(a0,d0.w*2)
@@ -2557,15 +2555,22 @@ get_flipped:
 
 fliptag:	ds.l	64		; flip cache: sprite number, frame last used
 
-; With more sprites than room (MAXBOB, SAVESIZE), the ones with the lowest
-; priority (highest numbers) are left out: pv_bobcut = the first left out.
-bob_cutoff:
-	movem.l	d0-d4/a0-a1,-(sp)
+; The sprites of the frame, looked at once: the ones on screen with pixels in
+; them -> pv_vis (their numbers, in order; pv_nvis of them), the palettes of
+; the ones on screen -> pv_sprpals. With more sprites than room (MAXBOB,
+; SAVESIZE), the ones with the lowest priority (highest numbers) are left
+; out: pv_bobcut = the first left out.
+list_sprites:
+	movem.l	d0-d6/a0-a2,-(sp)
 	lea	pv_sprsnap(a4),a0
 	lea	sprrows(pc),a1
+	lea	pv_vis(a4),a2
 	moveq	#0,d3			; lines to save
 	moveq	#0,d4			; sprites
 	moveq	#0,d2			; sprite number
+	moveq	#0,d5			; palettes
+	moveq	#0,d6			; (no room for more)
+	move.w	#NSPR,pv_bobcut(a4)
 .s	move.b	2(a0),d0		; y: on screen?
 	beq.s	.n
 	cmp.b	#240,d0
@@ -2579,6 +2584,12 @@ bob_cutoff:
 	sub.w	#256,d1
 .xp	cmp.w	#-15,d1
 	blt.s	.n
+	moveq	#7,d1			; its palette
+	and.w	d0,d1
+	add.w	#16,d1
+	bset	d1,d5
+	tst.b	d6
+	bne.s	.n
 	and.w	#$e0,d0
 	lsl.w	#3,d0
 	move.b	(a0),d0
@@ -2591,12 +2602,19 @@ bob_cutoff:
 	bhi.s	.cut
 	cmp.w	#MAXBOB,d4
 	bhi.s	.cut
+	move.b	d2,(a2)+
+	bra.s	.n
+.cut	st	d6
+	move.w	d2,pv_bobcut(a4)
 .n	addq.l	#4,a0
 	addq.w	#1,d2
 	cmp.w	#NSPR,d2
 	bne.s	.s
-.cut	move.w	d2,pv_bobcut(a4)
-	movem.l	(sp)+,d0-d4/a0-a1
+	lea	pv_vis(a4),a0
+	sub.l	a0,a2
+	move.w	a2,pv_nvis(a4)
+	move.l	d5,pv_sprpals(a4)
+	movem.l	(sp)+,d0-d6/a0-a2
 	rts
 
 ; a1 = sprite (4 planes x 16 words), a0 = its mask -> x-flipped copies at a3
@@ -2671,11 +2689,12 @@ update_palette:
 	bne.s	.recalc
 	rts
 .cmp	cmpm.l	(a0)+,(a3)+
-	beq.s	.n
+	dbne	d1,.cmp
+	beq.s	.n			; (all the same)
 	move.l	-4(a0),-4(a3)
 	moveq	#1,d2
-.n	dbf	d1,.cmp
-	rts
+	dbf	d1,.cmp
+.n	rts
 .recalc	lea	pv_rgb(a4),a2
 	moveq	#0,d3
 .bg	bsr.s	.pal16			; background 0-255
