@@ -216,29 +216,43 @@ z80_jp:
 	jmp	(a0)
 
 ; d7.w = Z80 address -> a0 = 68k code. Keeps every other register and the CCR.
+; (The table, tools/z80/translate.py: per region - banks 0-15, the fixed ROM
+; as 16 - its first entry, count and first group; the addresses, sorted in
+; each region; per group of 32 entries its first one's code offset, per
+; entry its offset from that.)
 z80_lookup:
 	move.w	ccr,-(sp)
-	movem.l	d0-d1/d6,-(sp)
+	movem.l	d0-d3/d6,-(sp)
 	and.l	#$ffff,d7
+	moveq	#16,d6			; region: the fixed ROM, or the bank in the window
 	cmp.w	#$8000,d7
 	blo.s	.fixed
 	cmp.w	#$c000,d7
 	bhs.s	.fixed
 	moveq	#0,d6
 	move.b	RT_BANK(a4),d6
-	swap	d6
+	swap	d6			; (bank << 16 | address: for the red screen)
 	or.l	d6,d7
-	bra.s	.search
+	swap	d6
+	bra.s	.reg
 .fixed	or.l	#$ff0000,d7
-.search	lea	z80_table_count(pc),a0
-	move.l	(a0)+,d1		; hi
-	moveq	#0,d0			; lo
+.reg	lea	z80_tdir(pc),a0
+	lea	(a0,d6.w*8),a0
+	moveq	#0,d0
+	move.w	(a0)+,d0		; lo: the region's first entry
+	moveq	#0,d1
+	move.w	(a0)+,d1
+	add.l	d0,d1			; hi
+	move.l	d0,d2			; (the region's first entry)
+	moveq	#0,d3
+	move.w	(a0),d3			; (its first group)
+	lea	z80_taddr(pc),a0
 .loop	cmp.l	d1,d0
 	bhs.s	.miss
 	move.l	d0,d6
 	add.l	d1,d6
 	lsr.l	#1,d6
-	cmp.l	(a0,d6.l*8),d7
+	cmp.w	(a0,d6.l*2),d7
 	beq.s	.hit
 	blo.s	.low
 	move.l	d6,d0
@@ -246,9 +260,32 @@ z80_lookup:
 	bra.s	.loop
 .low	move.l	d6,d1
 	bra.s	.loop
-.hit	move.l	4(a0,d6.l*8),d6
-	add.l	d6,a0
-	movem.l	(sp)+,d0-d1/d6
+.hit	lea	z80_tdelta(pc),a0
+	moveq	#0,d0
+	move.w	(a0,d6.l*2),d0		; from its group's first entry,
+	cmp.w	#$8000,d0		; or the runtime's own: by address
+	beq.s	.rt
+	sub.l	d2,d6
+	lsr.l	#5,d6
+	add.l	d3,d6			; its group
+	lea	z80_tgrp(pc),a0
+	add.l	(a0,d6.l*4),d0
+	lea	z80_table(pc),a0
+	add.l	d0,a0
+	movem.l	(sp)+,d0-d3/d6
+	move.w	(sp)+,ccr
+	rts
+.rt	lea	z80_trt(pc),a0
+.rtl	cmp.w	(a0),d7
+	beq.s	.rtf
+	addq.l	#8,a0
+	cmp.w	#$ffff,(a0)
+	bne.s	.rtl
+	bra.s	.miss
+.rtf	move.l	4(a0),d0
+	lea	z80_table(pc),a0
+	add.l	d0,a0
+	movem.l	(sp)+,d0-d3/d6
 	move.w	(sp)+,ccr
 	rts
 .miss	bra	z80_bad_jump

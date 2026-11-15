@@ -288,21 +288,29 @@ snd_jp_hl:
 	move.w	(sp)+,ccr
 	jmp	(a0)
 
-; d7.w = sound CPU address -> a0 = 68k code (keeps every other register)
+; d7.w = sound CPU address -> a0 = 68k code (keeps every other register).
+; (The table as the game's, src/rt_core.s z80_lookup: all of it in region 16.)
 snd_lookup:
 	move.w	ccr,-(sp)
-	movem.l	d0-d1/d6,-(sp)
+	movem.l	d0-d3/d6,-(sp)
 	and.l	#$ffff,d7
 	or.l	#$ff0000,d7
-	lea	snd_table_count(pc),a0
-	move.l	(a0)+,d1		; hi
-	moveq	#0,d0			; lo
+	lea	snd_tdir+16*8(pc),a0
+	moveq	#0,d0
+	move.w	(a0)+,d0		; lo
+	moveq	#0,d1
+	move.w	(a0)+,d1
+	add.l	d0,d1			; hi
+	move.l	d0,d2
+	moveq	#0,d3
+	move.w	(a0),d3
+	lea	snd_taddr(pc),a0
 .loop	cmp.l	d1,d0
 	bhs.s	.miss
 	move.l	d0,d6
 	add.l	d1,d6
 	lsr.l	#1,d6
-	cmp.l	(a0,d6.l*8),d7
+	cmp.w	(a0,d6.l*2),d7
 	beq.s	.hit
 	blo.s	.low
 	move.l	d6,d0
@@ -310,9 +318,32 @@ snd_lookup:
 	bra.s	.loop
 .low	move.l	d6,d1
 	bra.s	.loop
-.hit	move.l	4(a0,d6.l*8),d6
-	add.l	d6,a0
-	movem.l	(sp)+,d0-d1/d6
+.hit	lea	snd_tdelta(pc),a0
+	moveq	#0,d0
+	move.w	(a0,d6.l*2),d0		; from its group's first entry,
+	cmp.w	#$8000,d0		; or the runtime's own: by address
+	beq.s	.rt
+	sub.l	d2,d6
+	lsr.l	#5,d6
+	add.l	d3,d6
+	lea	snd_tgrp(pc),a0
+	add.l	(a0,d6.l*4),d0
+	lea	snd_table(pc),a0
+	add.l	d0,a0
+	movem.l	(sp)+,d0-d3/d6
+	move.w	(sp)+,ccr
+	rts
+.rt	lea	snd_trt(pc),a0
+.rtl	cmp.w	(a0),d7
+	beq.s	.rtf
+	addq.l	#8,a0
+	cmp.w	#$ffff,(a0)
+	bne.s	.rtl
+	bra.s	.miss
+.rtf	move.l	4(a0),d0
+	lea	snd_table(pc),a0
+	add.l	d0,a0
+	movem.l	(sp)+,d0-d3/d6
 	move.w	(sp)+,ccr
 	rts
 .miss	and.l	#$ffff,d7		; (bank $FD: the sound CPU)

@@ -660,16 +660,52 @@ class Translator:
         # computed-jump table: (bank << 16 | addr, bank $FF = fixed ROM), sorted.
         # Every instruction is listed: computed jumps also land on code that is
         # otherwise only reached by falling through.
+        # (compact: per region - banks 0-15, then the fixed ROM as 16 - its
+        # first entry, count and first group (z80_tdir); the entries' Z80
+        # addresses, sorted in each region (z80_taddr); per group of 32
+        # entries of a region the offset of the first one's code from
+        # z80_table (z80_tgrp), and per entry its code's offset from that
+        # (z80_tdelta): the code of a region is in address order)
         targets = sorted({k for k in self.cm.insns if not excluded(k)} |
                          {(None, a) for a in RUNTIME_LABELS},
                          key=lambda k: ((0xFF if k[0] is None else k[0]) << 16) | k[1])
-        w("\n; computed-jump table: Z80 (bank,address) -> 68k code")
+        regions = [[k for k in targets if k[0] == r] for r in range(16)] + \
+                  [[k for k in targets if k[0] is None]]
+        # The hand-written runtime's entries (RUNTIME_LABELS, elsewhere in the
+        # program) have $8000 there and their offsets in z80_trt.
+        rt = lambda k: k[0] is None and k[1] in RUNTIME_LABELS
+        w("\n; computed-jump table: Z80 (bank,address) -> 68k code (src/rt_core.s, z80_lookup)")
         w("\tcnop 0,4")
-        w("z80_table_count:\tdc.l %d" % len(targets))
         w("z80_table:")
-        for k in targets:
-            w("\tdc.l $%06x,%s-z80_table" % (((0xFF if k[0] is None else k[0]) << 16) | k[1],
-                                             label(*k)))
+        first, groups = 0, []
+        dirs = []
+        for ks in regions:
+            dirs.append((first, len(ks), len(groups)))
+            for i in range(0, len(ks), 32):
+                groups.append(next((k for k in ks[i:i + 32] if not rt(k)), ks[i]))
+            first += len(ks)
+        w("z80_tgrp:")
+        for k in groups:
+            w("\tdc.l %s-z80_table" % label(*k))
+        w("z80_trt:")
+        for a in sorted(RUNTIME_LABELS):
+            w("\tdc.w $%04x,0\n\tdc.l %s-z80_table" % (a, label(None, a)))
+        w("\tdc.w $ffff,0\n\tdc.l 0")
+        w("z80_tdir:")
+        for f, n, g in dirs:
+            w("\tdc.w %d,%d,%d,0" % (f, n, g))
+        w("z80_taddr:")
+        for ks in regions:
+            for i in range(0, len(ks), 16):
+                w("\tdc.w " + ",".join("$%04x" % k[1] for k in ks[i:i + 16]))
+        w("z80_tdelta:")
+        gi = 0
+        for ks in regions:
+            for i, k in enumerate(ks):
+                if i % 32 == 0:
+                    base = groups[gi]
+                    gi += 1
+                w("\tdc.w $8000" if rt(k) else "\tdc.w %s-%s" % (label(*k), label(*base)))
         if self.stacks:
             w("\n; task stacks (68k return addresses are 4 bytes: give each 1K)")
             w("\tcnop 0,4")
