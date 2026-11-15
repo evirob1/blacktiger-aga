@@ -37,14 +37,19 @@ VOICES		equ	12
 BP_HASH		rs.w	1
 BP_ATT		rs.w	1		; its loudness: attenuation in TL steps (0.75 dB)
 BP_K		rs.w	1		; pitch: step (16.16) = (fnum << block) * K >> 8
-BP_REL		rs.w	1		; release: 1/16 TL steps per chunk
-BP_FADE1	rs.w	1		; held, in the loop: the decay's rest (rate,
-BP_TOTAL1	rs.w	1		; total), then
-BP_FADE2	rs.w	1		; the sustain rate
+		rs.w	1
+BP_DR		rs.w	1		; held, in the loop: the loudest carrier's
+BP_TOTAL1	rs.w	1		; decay, the rest of it to its sustain level
+BP_SR		rs.w	1		; (1/256 TL steps), then the slowest sustain
+					; rate: each its rate without key scaling
+					; << 8 | the carrier's key scaling (as the
+					; chip: faster for higher notes)
 		rs.w	1
 BP_START	rs.l	1		; offset in bank_samples
 BP_LEN		rs.l	1
 BP_LOOP		rs.l	1		; offset of the loop, or -1 (one-shot)
+BP_REL		rs.w	8		; release (key off), per block: 1/256 TL
+					; steps per chunk, all the carriers together
 BP_SIZE		rs.b	0
 
 ; a voice
@@ -57,7 +62,7 @@ V_LOOP		rs.l	1		; loop length << 16 (0: one-shot)
 V_VOL		rs.l	1		; volume 1-64 (0: silent)
 V_ROW		rs.l	1		; its play_vols row, as the channel is scaled
 V_PATCH		rs.l	1		; bank patch (FM)
-V_REL		rs.w	1		; extra attenuation (1/16 TL steps): release, fade
+V_REL		rs.w	1		; extra attenuation (1/256 TL steps): release, fade
 V_FADED		rs.w	1		; (how much of the decay's rest is done)
 V_SIZE		rs.b	0
 
@@ -328,9 +333,11 @@ fm_update:
 	moveq	#$0f,d0			; keyed (any slot on)?
 	and.b	(a1,d7.w),d0
 	bne.s	.held
-	move.w	BP_REL(a0),d0		; released
-	add.w	d0,V_REL(a5)
-	bra.s	.att
+	moveq	#$38,d0			; released: by the note's block
+	and.b	$a4(a2,d5.w),d0
+	lsr.w	#2,d0
+	move.w	BP_REL(a0,d0.w),d0
+	bra.s	.fa
 .held	tst.l	V_LOOP(a5)		; held, in the loop: the fade
 	beq.s	.att
 	move.l	V_POS(a5),d0
@@ -341,11 +348,17 @@ fm_update:
 	move.w	V_FADED(a5),d0
 	cmp.w	BP_TOTAL1(a0),d0
 	bhs.s	.f2
-	move.w	BP_FADE1(a0),d0
+	move.w	BP_DR(a0),d0
+	bsr	eg_step
 	add.w	d0,V_FADED(a5)
+	bvc.s	.fa
+	move.w	#$7fff,V_FADED(a5)
 	bra.s	.fa
-.f2	move.w	BP_FADE2(a0),d0
+.f2	move.w	BP_SR(a0),d0
+	bsr	eg_step
 .fa	add.w	d0,V_REL(a5)
+	bvc.s	.att
+	move.w	#$7fff,V_REL(a5)	; (gone)
 .att	moveq	#7,d1			; loudness: the carriers' level (the lowest
 	and.b	$b0(a2,d5.w),d1		; attenuation)
 	move.b	carrier_masks(pc,d1.w),d1
@@ -365,7 +378,7 @@ fm_update:
 	bne.s	.c
 	add.w	BP_ATT(a0),d2		; + the patch's own, + release / fade
 	move.w	V_REL(a5),d3
-	lsr.w	#4,d3
+	lsr.w	#8,d3
 	add.w	d3,d2
 	cmp.w	#127,d2
 	bls.s	.v
@@ -393,6 +406,57 @@ fm_update:
 	lsr.l	#8,d1
 	move.l	d1,V_STEP(a5)
 	rts
+
+; d0.w = an envelope rate without key scaling << 8 | key scaling (BP_RR,
+; BP_DR, BP_SR), a2 = registers, d5 = channel -> d0.w = its step this chunk
+; (1/256 TL steps): the rate plus key code >> (3 - key scaling), as the chip.
+; Keeps the other registers.
+eg_step:
+	movem.l	d1-d3,-(sp)
+	moveq	#0,d1
+	move.w	d0,d1
+	lsr.w	#8,d1			; rate
+	beq.s	.zero			; (0: none, whatever the key)
+	moveq	#3,d2
+	and.w	d0,d2
+	neg.w	d2
+	addq.w	#3,d2			; 3 - key scaling
+	moveq	#0,d0			; key code: block << 2 | F11 << 1 | N3
+	move.b	$a4(a2,d5.w),d0
+	lsl.w	#8,d0
+	move.b	$a0(a2,d5.w),d0		; block << 11 | F-number
+	move.w	d0,d3
+	lsr.w	#8,d3
+	lsr.w	#1,d3
+	and.w	#$1e,d3			; block << 2 | F11 << 1
+	btst	#10,d0			; N3 = F11 & (F10 | F9 | F8) | !F11 & F10 & F9 & F8
+	beq.s	.n0
+	and.w	#$0380,d0
+	sne	d0
+	bra.s	.n1
+.n0	and.w	#$0380,d0
+	cmp.w	#$0380,d0
+	seq	d0
+.n1	and.w	#1,d0
+	or.w	d0,d3			; key code
+	lsr.w	d2,d3			; key scaling's part
+	add.w	d3,d1
+	cmp.w	#63,d1
+	bls.s	.r
+	moveq	#63,d1
+.r	move.w	eg_steps(pc,d1.w*2),d0
+	movem.l	(sp)+,d1-d3
+	rts
+.zero	moveq	#0,d0
+	movem.l	(sp)+,d1-d3
+	rts
+; per envelope rate 0-63: its attenuation step per chunk (1/256 TL steps),
+; the chip's average (eg_inc in tools/sound/opn.py) over the chunk's time
+eg_steps:
+	dc.w	0,2,2,2,3,3,4,5,5,7,8,9,11,13,16,19
+	dc.w	22,27,32,38,43,54,65,75,86,108,129,151,172,215,258,301
+	dc.w	344,431,517,603,689,861,1033,1206,1378,1722,2067,2411,2756,3445,4134,4823
+	dc.w	5512,6890,8267,9645,11023,13779,16535,19291,22046,27558,32767,32767,32767,32767,32767,32767
 
 ; a2 = the chip's registers, d5 = channel, a5 = voice: tone or noise
 ssg_update:

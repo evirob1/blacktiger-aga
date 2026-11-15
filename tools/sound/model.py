@@ -87,6 +87,7 @@ class Sample:
         top = int(env.argmax())
         gone = next((i for i in range(top, len(env)) if env[i:].max() < peak * 0.004), None)
         self.decay = self.decay1 = self.decay1_db = 0.0
+        self.lead_slot = self.sr_slot = CARRIERS[fbalg & 7][-1]
         if gone is not None and gone * 64 < self.ONE_SHOT * SRATE:
             self.data, self.loop = data[:max(gone, 1) * 64], None      # (silent: a little)
             return
@@ -102,6 +103,7 @@ class Sample:
         # (not settled yet: the rest of the decay to the sustain level, by the
         # loudest carrier)
         lead = min(ops_, key=lambda o: o.att)
+        self.lead_slot = car[ops_.index(lead)]          # (for the player's decay: tools/sound/bank.py)
         self.decay1_db = max(0.0, (lead.sl - lead.att) * 0.09375) if lead.stage == "decay" else 0.0
         self.decay1 = opn.eg_inc(lead.dr) * (opn.RATE / 3) * 0.09375
         # loop whole periods of the fundamental from there
@@ -114,6 +116,7 @@ class Sample:
         self.data, self.loop = data[:settle + n], settle
         # the fade while held: the slowest carrier's sustain rate
         rates = [o.sr for o in ops_]
+        self.sr_slot = car[min(range(len(rates)), key=lambda i: opn.eg_inc(rates[i]) if rates[i] else -1)]
         self.decay = 0.0 if 0 in rates else min(opn.eg_inc(r) for r in rates) * (opn.RATE / 3) * 0.09375
 
     @staticmethod

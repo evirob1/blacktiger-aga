@@ -46,6 +46,37 @@ def patch_hash(regs, ch):
     return h
 
 
+def release_steps(p, fbalg, block, held=0.15, drop=30.0):
+    """A patch's fade after key off, for notes of a block: the carriers'
+    gains summed (as they reach the output), from where a note held for
+    `held` seconds leaves them, until they are `drop` dB down -> the average
+    in 1/256 TL steps per player chunk (src/sound_play.s, BP_REL)."""
+    kc = opn.keycode(0x400, block)          # (mid-block)
+    regs = dict(p)
+    regs[0x40] = [0, 0, 0, 0]
+    regs[0xB0] = fbalg
+    ops = [opn.Operator(regs, c, kc) for c in model.CARRIERS[fbalg & 7]]
+    step = opn.EG_EVERY / opn.RATE
+    t = 0.0
+    while t < held:
+        for o in ops:
+            o.eg_step()
+        t += step
+    total = lambda: sum(o.gain() for o in ops)
+    g0 = total()
+    if g0 <= 0:
+        return 0
+    for o in ops:
+        o.key_off()
+    t = 0.0
+    while total() > g0 * 10 ** (-drop / 20) and t < 20:
+        for o in ops:
+            o.eg_step()
+        t += step
+    steps_per_s = drop / TL_DB * 256 / max(t, 1e-6)
+    return min(32767, round(steps_per_s * model.CHUNK / model.RATE))
+
+
 def capture():
     """Play every command; the patches keyed on: {hash: {patch key: {frequency: count}}}."""
     t = UNITS
@@ -111,21 +142,23 @@ def main():
         # pitch: step (16.16, sample positions per output sample: the samples
         # are at half the output rate) = (fnum << block) * K >> 8
         k = opn.CLOCK / (144 * 16 * s.f_ref) * 256 / model.SDIV
-        # release: the slowest carrier's rate, in 1/16 TL steps per player chunk
+        # the envelope from here. Held, once in the loop: the rest of the
+        # loudest carrier's decay to its sustain level (total, 1/256 TL
+        # steps), then the slowest sustain rate, as rates the player scales by
+        # each note's key code as the chip does (src/sound_play.s, eg_step):
+        # the rate without key scaling << 8 | the operator's key scaling.
+        # Released: per block, the fade of all the carriers together
         p = {b: list(v) for b, v in zip((0x30, 0x50, 0x60, 0x70, 0x80, 0x90), key[0])}
-        rr = min((p[0x80][c] & 15) * 4 + 2 for c in model.CARRIERS[key[2] & 7])
-        t96 = 1023 / max(opn.eg_inc(rr), 1e-9) / (opn.RATE / 3)
-        rel = round(96 / TL_DB * 16 * (model.CHUNK / model.RATE) / t96)
-        # the fade while held, once in the loop (1/16 TL steps per chunk): the
-        # rest of the decay to the sustain level (rate, total), then the
-        # sustain rate
-        per = 16 / TL_DB * model.CHUNK / model.RATE
-        fade1, total1 = round(s.decay1 * per), round(s.decay1_db / TL_DB * 16)
-        fade2 = round(s.decay * per)
+        ks = lambda c: p[0x50][c] >> 6
+        rel = [release_steps(p, key[2], b) for b in range(8)]
+        c = s.lead_slot
+        dr = (2 * (p[0x60][c] & 31)) << 8 | ks(c)
+        total1 = min(32767, round(s.decay1_db / TL_DB * 256))
+        c = s.sr_slot
+        sr = (2 * (p[0x70][c] & 31)) << 8 | ks(c)
         loop = -1 if s.loop is None else start + s.loop
-        entries.append((h, att, round(k), min(rel, 32767), min(fade1, 32767), min(total1, 32767),
-                        min(fade2, 32767), start, len(data), loop))
-    table = b"".join(struct.pack(">HhhhhhhhIIi", *(e[:7] + (0,) + e[7:])) for e in entries)
+        entries.append((h, att, round(k), 0, dr, total1, sr, start, len(data), loop) + tuple(rel))
+    table = b"".join(struct.pack(">HhhhhhhhIIi8h", *(e[:7] + (0,) + e[7:])) for e in entries)
     open(out, "wb").write(table + bytes(blob))
     open(inc, "w").write("BANK_PATCHES\tequ\t%d\t\t; (tools/sound/bank.py)\nBANK_SIZE\tequ\t%d\n" %
                          (len(entries), len(table) + len(blob)))
