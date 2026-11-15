@@ -2805,8 +2805,8 @@ build_copper:
 .bank	move.w	#BPLCON3,(a0)+
 	move.w	d4,d1
 	ror.w	#3,d1
-	or.w	#$0040,d1		; lowres sprites
-	move.w	d1,(a0)+
+	or.w	#$0060,d1		; lowres sprites; the border black (BRDRBLNK:
+	move.w	d1,(a0)+		; not colour 0, whichever palette has slot 0)
 	move.w	#COLOR00,d1
 	moveq	#1,d3
 .slot	bsr	slot_colours
