@@ -292,58 +292,89 @@ snd_jp_hl:
 ; (The table as the game's, src/rt_core.s z80_lookup: all of it in region 16.)
 snd_lookup:
 	move.w	ccr,-(sp)
-	movem.l	d0-d3/d6,-(sp)
+	movem.l	d0-d3/d6/a1,-(sp)
 	and.l	#$ffff,d7
 	or.l	#$ff0000,d7
-	lea	snd_tdir+16*8(pc),a0
-	moveq	#0,d0
-	move.w	(a0)+,d0		; lo
-	moveq	#0,d1
-	move.w	(a0)+,d1
-	add.l	d0,d1			; hi
-	move.l	d0,d2
-	moveq	#0,d3
-	move.w	(a0),d3
-	lea	snd_taddr(pc),a0
-.loop	cmp.l	d1,d0
-	bhs.s	.miss
-	move.l	d0,d6
-	add.l	d1,d6
-	lsr.l	#1,d6
-	cmp.w	(a0,d6.l*2),d7
-	beq.s	.hit
-	blo.s	.low
-	move.l	d6,d0
-	addq.l	#1,d0
-	bra.s	.loop
-.low	move.l	d6,d1
-	bra.s	.loop
-.hit	lea	snd_tdelta(pc),a0
-	moveq	#0,d0
-	move.w	(a0,d6.l*2),d0		; from its group's first entry,
-	cmp.w	#$8000,d0		; or the runtime's own: by address
-	beq.s	.rt
-	sub.l	d2,d6
-	lsr.l	#5,d6
-	add.l	d3,d6
-	lea	snd_tgrp(pc),a0
-	add.l	(a0,d6.l*4),d0
-	lea	snd_table(pc),a0
-	add.l	d0,a0
-	movem.l	(sp)+,d0-d3/d6
-	move.w	(sp)+,ccr
-	rts
-.rt	lea	snd_trt(pc),a0
-.rtl	cmp.w	(a0),d7
-	beq.s	.rtf
+	moveq	#16,d6
+	lea	snd_trt(pc),a0	; the runtime's own
+.rt	cmp.w	(a0),d7
+	beq	.rtf
 	addq.l	#8,a0
 	cmp.w	#$ffff,(a0)
-	bne.s	.rtl
+	bne.s	.rt
+	lea	snd_tdir(pc),a0
+	lea	(a0,d6.w*8),a0
+	moveq	#0,d2
+	move.w	(a0)+,d2		; lo: the region's first group
+	moveq	#0,d1
+	move.w	(a0)+,d1		; its groups
+	beq	.miss
+	add.l	d2,d1			; hi
+	movem.l	d2/a0,-(sp)		; (first group, -> its entries)
+	lea	snd_tgrp(pc),a0
+.bs	move.l	d1,d3			; the last group from at most d7
+	sub.l	d2,d3
+	cmp.l	#1,d3
+	bls.s	.grp
+	move.l	d2,d6
+	add.l	d1,d6
+	lsr.l	#1,d6
+	move.l	d6,d3
+	add.l	d3,d3
+	add.l	d6,d3
+	lsl.l	#2,d3			; * 12
+	cmp.w	(a0,d3.l),d7
+	blo.s	.lo
+	move.l	d6,d2
+	bra.s	.bs
+.lo	move.l	d6,d1
+	bra.s	.bs
+.grp	move.l	d2,d3
+	add.l	d3,d3
+	add.l	d2,d3
+	lsl.l	#2,d3
+	move.w	(a0,d3.l),d6		; its first address
+	move.l	4(a0,d3.l),d0		; its code
+	move.l	8(a0,d3.l),d1
+	lea	snd_tent(pc),a1
+	add.l	d1,a1			; its entries
+	movem.l	(sp)+,d1/a0		; d1: the region's first group
+	sub.l	d1,d2
+	lsl.l	#5,d2			; entries before it in the region
+	moveq	#0,d1
+	move.w	(a0),d1			; the region's entries
+	sub.l	d2,d1			; left from this group
+	cmp.l	#32,d1
+	bls.s	.cnt
+	moveq	#32,d1
+.cnt	subq.w	#1,d1
+	cmp.w	d6,d7
+	blo.s	.miss
+.sc	moveq	#0,d3			; step in address (the first: 0)
+	move.b	(a1)+,d3
+	cmp.b	#255,d3
+	bne.s	.d1
+	move.b	(a1)+,d3
+	lsl.w	#8,d3
+	move.b	(a1)+,d3
+.d1	add.w	d3,d6
+	cmp.w	d6,d7
+	beq.s	.hit
+	blo.s	.miss
+	moveq	#0,d3			; its code's size
+	move.b	(a1)+,d3
+	cmp.b	#255,d3
+	bne.s	.s1
+	move.b	(a1)+,d3
+	lsl.w	#8,d3
+	move.b	(a1)+,d3
+.s1	add.l	d3,d0
+	dbf	d1,.sc
 	bra.s	.miss
 .rtf	move.l	4(a0),d0
-	lea	snd_table(pc),a0
+.hit	lea	snd_table(pc),a0
 	add.l	d0,a0
-	movem.l	(sp)+,d0-d3/d6
+	movem.l	(sp)+,d0-d3/d6/a1
 	move.w	(sp)+,ccr
 	rts
 .miss	and.l	#$ffff,d7		; (bank $FD: the sound CPU)

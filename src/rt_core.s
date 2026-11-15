@@ -217,12 +217,12 @@ z80_jp:
 
 ; d7.w = Z80 address -> a0 = 68k code. Keeps every other register and the CCR.
 ; (The table, tools/z80/translate.py: per region - banks 0-15, the fixed ROM
-; as 16 - its first entry, count and first group; the addresses, sorted in
-; each region; per group of 32 entries its first one's code offset, per
-; entry its offset from that.)
+; as 16 - its first group, groups and entries; per group of 32 entries its
+; first address, code and entries; per entry the step in address from the
+; one before and the size of its code.)
 z80_lookup:
 	move.w	ccr,-(sp)
-	movem.l	d0-d3/d6,-(sp)
+	movem.l	d0-d3/d6/a1,-(sp)
 	and.l	#$ffff,d7
 	moveq	#16,d6			; region: the fixed ROM, or the bank in the window
 	cmp.w	#$8000,d7
@@ -236,56 +236,86 @@ z80_lookup:
 	swap	d6
 	bra.s	.reg
 .fixed	or.l	#$ff0000,d7
-.reg	lea	z80_tdir(pc),a0
-	lea	(a0,d6.w*8),a0
-	moveq	#0,d0
-	move.w	(a0)+,d0		; lo: the region's first entry
-	moveq	#0,d1
-	move.w	(a0)+,d1
-	add.l	d0,d1			; hi
-	move.l	d0,d2			; (the region's first entry)
-	moveq	#0,d3
-	move.w	(a0),d3			; (its first group)
-	lea	z80_taddr(pc),a0
-.loop	cmp.l	d1,d0
-	bhs.s	.miss
-	move.l	d0,d6
-	add.l	d1,d6
-	lsr.l	#1,d6
-	cmp.w	(a0,d6.l*2),d7
-	beq.s	.hit
-	blo.s	.low
-	move.l	d6,d0
-	addq.l	#1,d0
-	bra.s	.loop
-.low	move.l	d6,d1
-	bra.s	.loop
-.hit	lea	z80_tdelta(pc),a0
-	moveq	#0,d0
-	move.w	(a0,d6.l*2),d0		; from its group's first entry,
-	cmp.w	#$8000,d0		; or the runtime's own: by address
-	beq.s	.rt
-	sub.l	d2,d6
-	lsr.l	#5,d6
-	add.l	d3,d6			; its group
-	lea	z80_tgrp(pc),a0
-	add.l	(a0,d6.l*4),d0
-	lea	z80_table(pc),a0
-	add.l	d0,a0
-	movem.l	(sp)+,d0-d3/d6
-	move.w	(sp)+,ccr
-	rts
-.rt	lea	z80_trt(pc),a0
-.rtl	cmp.w	(a0),d7
-	beq.s	.rtf
+.reg
+	lea	z80_trt(pc),a0	; the runtime's own
+.rt	cmp.w	(a0),d7
+	beq	.rtf
 	addq.l	#8,a0
 	cmp.w	#$ffff,(a0)
-	bne.s	.rtl
+	bne.s	.rt
+	lea	z80_tdir(pc),a0
+	lea	(a0,d6.w*8),a0
+	moveq	#0,d2
+	move.w	(a0)+,d2		; lo: the region's first group
+	moveq	#0,d1
+	move.w	(a0)+,d1		; its groups
+	beq	.miss
+	add.l	d2,d1			; hi
+	movem.l	d2/a0,-(sp)		; (first group, -> its entries)
+	lea	z80_tgrp(pc),a0
+.bs	move.l	d1,d3			; the last group from at most d7
+	sub.l	d2,d3
+	cmp.l	#1,d3
+	bls.s	.grp
+	move.l	d2,d6
+	add.l	d1,d6
+	lsr.l	#1,d6
+	move.l	d6,d3
+	add.l	d3,d3
+	add.l	d6,d3
+	lsl.l	#2,d3			; * 12
+	cmp.w	(a0,d3.l),d7
+	blo.s	.lo
+	move.l	d6,d2
+	bra.s	.bs
+.lo	move.l	d6,d1
+	bra.s	.bs
+.grp	move.l	d2,d3
+	add.l	d3,d3
+	add.l	d2,d3
+	lsl.l	#2,d3
+	move.w	(a0,d3.l),d6		; its first address
+	move.l	4(a0,d3.l),d0		; its code
+	move.l	8(a0,d3.l),d1
+	lea	z80_tent(pc),a1
+	add.l	d1,a1			; its entries
+	movem.l	(sp)+,d1/a0		; d1: the region's first group
+	sub.l	d1,d2
+	lsl.l	#5,d2			; entries before it in the region
+	moveq	#0,d1
+	move.w	(a0),d1			; the region's entries
+	sub.l	d2,d1			; left from this group
+	cmp.l	#32,d1
+	bls.s	.cnt
+	moveq	#32,d1
+.cnt	subq.w	#1,d1
+	cmp.w	d6,d7
+	blo.s	.miss
+.sc	moveq	#0,d3			; step in address (the first: 0)
+	move.b	(a1)+,d3
+	cmp.b	#255,d3
+	bne.s	.d1
+	move.b	(a1)+,d3
+	lsl.w	#8,d3
+	move.b	(a1)+,d3
+.d1	add.w	d3,d6
+	cmp.w	d6,d7
+	beq.s	.hit
+	blo.s	.miss
+	moveq	#0,d3			; its code's size
+	move.b	(a1)+,d3
+	cmp.b	#255,d3
+	bne.s	.s1
+	move.b	(a1)+,d3
+	lsl.w	#8,d3
+	move.b	(a1)+,d3
+.s1	add.l	d3,d0
+	dbf	d1,.sc
 	bra.s	.miss
 .rtf	move.l	4(a0),d0
-	lea	z80_table(pc),a0
+.hit	lea	z80_table(pc),a0
 	add.l	d0,a0
-	movem.l	(sp)+,d0-d3/d6
+	movem.l	(sp)+,d0-d3/d6/a1
 	move.w	(sp)+,ccr
 	rts
 .miss	bra	z80_bad_jump

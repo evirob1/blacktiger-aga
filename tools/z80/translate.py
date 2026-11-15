@@ -602,6 +602,8 @@ class Translator:
         for ws in self.cm.rst_targets.values():
             targets |= {codemap.loc(None, a) for a in ws}
 
+        nlines = {}             # (lines of 68k code per instruction: the table's sizes)
+
         def flush():
             nonlocal pending
             if pending:
@@ -653,6 +655,7 @@ class Translator:
                     flush()
             for l in lines:
                 w(("\t" + l) if not l.endswith(":") else l)
+            nlines[key] = len(lines)
             prev_end = None if t.end else codemap.loc(key[0], key[1] + ins.length)
         flush()
         if prev_end is not None:
@@ -661,51 +664,50 @@ class Translator:
         # Every instruction is listed: computed jumps also land on code that is
         # otherwise only reached by falling through.
         # (compact: per region - banks 0-15, then the fixed ROM as 16 - its
-        # first entry, count and first group (z80_tdir); the entries' Z80
-        # addresses, sorted in each region (z80_taddr); per group of 32
-        # entries of a region the offset of the first one's code from
-        # z80_table (z80_tgrp), and per entry its code's offset from that
-        # (z80_tdelta): the code of a region is in address order)
-        targets = sorted({k for k in self.cm.insns if not excluded(k)} |
-                         {(None, a) for a in RUNTIME_LABELS},
+        # first group, groups and entries (z80_tdir); per group of 32 entries
+        # its first Z80 address, its code's offset from z80_table and its
+        # entries' offset in z80_tent (z80_tgrp); per entry the step from the
+        # entry before in Z80 address, then the size of its code (to the next
+        # entry's: a region's code is in address order), each a byte or $ff
+        # and a word. The hand-written runtime's entries (RUNTIME_LABELS,
+        # elsewhere in the program) are in z80_trt.)
+        targets = sorted({k for k in self.cm.insns if not excluded(k)},
                          key=lambda k: ((0xFF if k[0] is None else k[0]) << 16) | k[1])
         regions = [[k for k in targets if k[0] == r] for r in range(16)] + \
                   [[k for k in targets if k[0] is None]]
-        # The hand-written runtime's entries (RUNTIME_LABELS, elsewhere in the
-        # program) have $8000 there and their offsets in z80_trt.
-        rt = lambda k: k[0] is None and k[1] in RUNTIME_LABELS
         w("\n; computed-jump table: Z80 (bank,address) -> 68k code (src/rt_core.s, z80_lookup)")
         w("\tcnop 0,4")
         w("z80_table:")
-        first, groups = 0, []
-        dirs = []
-        for ks in regions:
-            dirs.append((first, len(ks), len(groups)))
-            for i in range(0, len(ks), 32):
-                groups.append(next((k for k in ks[i:i + 32] if not rt(k)), ks[i]))
-            first += len(ks)
-        w("z80_tgrp:")
-        for k in groups:
-            w("\tdc.l %s-z80_table" % label(*k))
         w("z80_trt:")
         for a in sorted(RUNTIME_LABELS):
             w("\tdc.w $%04x,0\n\tdc.l %s-z80_table" % (a, label(None, a)))
         w("\tdc.w $ffff,0\n\tdc.l 0")
+        dirs, grp, ent = [], [], []
+        for ks in regions:
+            dirs.append((len(grp), (len(ks) + 31) // 32, len(ks)))
+            for g in range(0, len(ks), 32):
+                grp.append((ks[g][1], label(*ks[g]), "_te%d" % len(grp)))
+                ent.append("_te%d:" % (len(grp) - 1))
+                for i in range(g, min(g + 32, len(ks))):
+                    k = ks[i]
+                    d = 0 if i == g else k[1] - ks[i - 1][1]
+                    ent.append("\tdc.b %d" % d if d < 255 else "\tdc.b 255\n\tdc.b %d,%d" % (d >> 8, d & 255))
+                    if i + 1 < len(ks):
+                        size = "%s-%s" % (label(*ks[i + 1]), label(*k))
+                        bound = 10 * (nlines.get(k, 30) + 2) + 6
+                        ent.append("\tdc.b %s" % size if bound < 255 else
+                                   "\tdc.b 255\n\tdc.b (%s)>>8,(%s)&255" % (size, size))
+                    else:
+                        ent.append("\tdc.b 0")
         w("z80_tdir:")
-        for f, n, g in dirs:
-            w("\tdc.w %d,%d,%d,0" % (f, n, g))
-        w("z80_taddr:")
-        for ks in regions:
-            for i in range(0, len(ks), 16):
-                w("\tdc.w " + ",".join("$%04x" % k[1] for k in ks[i:i + 16]))
-        w("z80_tdelta:")
-        gi = 0
-        for ks in regions:
-            for i, k in enumerate(ks):
-                if i % 32 == 0:
-                    base = groups[gi]
-                    gi += 1
-                w("\tdc.w $8000" if rt(k) else "\tdc.w %s-%s" % (label(*k), label(*base)))
+        for g, n, e in dirs:
+            w("\tdc.w %d,%d,%d,0" % (g, n, e))
+        w("z80_tgrp:")
+        for a, lab, el in grp:
+            w("\tdc.w $%04x,0\n\tdc.l %s-z80_table,%s-z80_tent" % (a, lab, el))
+        w("z80_tent:")
+        out.extend(ent)
+        w("\teven")
         if self.stacks:
             w("\n; task stacks (68k return addresses are 4 bytes: give each 1K)")
             w("\tcnop 0,4")
@@ -810,6 +812,7 @@ def sound_names(text):
     """The sound translation's names, apart from the game's: s_xxxx, snd_*."""
     text = re.sub(r"\bz_([0-9a-f]{4})\b", r"s_\1", text)
     text = re.sub(r"\b_t(\d+)\b", r"_s\1", text)
+    text = re.sub(r"\b_te(\d+)\b", r"_se\1", text)
     text = re.sub(r"\bzstk_", "sstk_", text)
     return re.sub(r"\bz80_", "snd_", text)
 
