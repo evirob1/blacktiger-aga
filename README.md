@@ -19,7 +19,7 @@ set). Please don't distribute the built disk images.
 | Game sprites (player, enemies, shots) | done: blitter objects, triple buffered; matches a MAME-style reference render |
 | Background priority (scenery in front of sprites) | done: the front pens of background palettes 0-5 redrawn over the objects (MAME's split table) |
 | Code coverage of later levels | all eight levels played through to the ending; code never seen would stop with a red screen that says where |
-| Sound | the arcade's sound program translated (its YM2203 register writes match MAME exactly), played through a software mixer of sampled FM instruments and SSG tones, or (68040 / 68060) the chips synthesised in real time; effects as samples on a stock A1200 |
+| Sound | the arcade's sound program translated (its YM2203 register writes match MAME exactly), played through a software mixer of sampled FM instruments and SSG tones, or (68040 / 68060) the chips synthesised in real time; on a stock A1200 the tunes as notes on Paula's four channels (tools/sound/tracker.py: doubling and echo voices and chords pre-mixed where they fit) with the effects as samples |
 | WHDLoad/HD install | planned |
 
 See [docs/PLAN.md](docs/PLAN.md) for the analysis, the stock-A1200 budget and the roadmap.
@@ -80,12 +80,17 @@ Sound: with fast RAM, the arcade's sound program runs (about 500 times a
 second) and its 12 voices are mixed in software - music and effects, about a
 third of the CPU. **F9** switches the music on or off (off silences the tune
 playing; on starts with the next tune the game plays). On a stock A1200 there
-is neither the room nor the time for that: the game plays the sound effects
-as samples straight on Paula's four channels instead (rendered at build time
-by ymfm, MAME's YM2203 emulation; about 2% of the CPU), the credit jingle and
-the story page's tune, and no other music (the story tune is left out if chip
-RAM is short). The game
-itself always runs at full speed: sound costs display frames.
+is neither the room nor the time for that. There the tunes play as notes
+straight on Paula's four channels (src/trk_play.s; about 1% of the CPU): made
+at build time by tools/sound/tracker.py from the sound program's own output -
+its six FM voices, each note a sample of its instrument (rendered by ymfm,
+MAME's YM2203 emulation) at a period, faded as the chip's envelope would; a
+doubling or echo voice plays on a free channel, and the commonest chords and
+doublings that would be left out are pre-mixed into one sample. The sound
+effects are samples too, and take a channel while they play. Music and
+effects need 1970 KB of chip RAM free at boot; with less the game plays the
+effects only. The game itself always runs at full speed: sound costs display
+frames.
 
 On a 68040 or 68060 with fast RAM the two YM2203s are synthesised instead, in
 real time (src/fm_synth.s: FM operators, envelopes and the SSG as the chips do

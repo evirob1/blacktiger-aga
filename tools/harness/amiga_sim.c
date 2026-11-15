@@ -28,15 +28,29 @@ static unsigned long long FRAME = 283750;  /* PAL; NTSC timing (BEAMCON0 = 0): 2
 static unsigned char mem[MEMSIZE];
 static unsigned int z80mem_off, vars_off;
 static int irq_pending;
-/* Paula: the four channels' DMA (block timing only) and channel 0's block
-   interrupt (level 4); BT_WAV=file records what they play (0+3 left, 1+2 right) */
-static int aud_pending;
+/* Paula: each channel's DMA - a block from AUDxLC / LEN (latched as it
+   starts, when the channel's interrupt comes: level 4), played at its period
+   (colour clocks: 4 68k cycles each); AUDxVOL as it is. BT_WAV=file records
+   what they play at WAV_RATE (0+3 left, 1+2 right) */
+static unsigned int aud_pending;          /* INTREQ bits 7-10 */
 static unsigned int aud_lc[4], aud_len[4], aud_per[4], aud_vol[4], dmacon, intena;
-static unsigned long long aud_next;
-static int aud_on;
+static unsigned int aud_ptr[4], aud_n[4];  /* the block playing: start, bytes */
+static unsigned long long aud_t0[4];      /* ... when it started (68k cycles) */
+static int aud_run[4];
 static FILE *wav;
 static unsigned int wav_frames;
-static void set_ipl(void) { m68k_set_irq(aud_pending ? 4 : irq_pending ? 3 : 0); }
+#define WAV_RATE 28000
+static unsigned long long wav_next;
+/* CIA-B timer A (continuous; E clock: 20 68k cycles) and its interrupt (level 6) */
+static unsigned int ciab_latch = 0xffff, ciab_cra, ciab_icr_mask, ciab_icr;
+static unsigned long long ciab_next;
+static int ciab_pending;
+static unsigned int n_lev4, n_lev6;
+static int started_frame = -1;            /* (the program's start: BT_TRAPFROM counts from there) */
+static void set_ipl(void)
+{
+    m68k_set_irq(ciab_pending && (intena & 0x2000) ? 6 : (aud_pending & intena & 0x780) ? 4 : irq_pending ? 3 : 0);
+}
 static unsigned long long now;            /* 68k cycles */
 static unsigned long long in_lev3, lev3_start;
 static int in_irq;
@@ -79,7 +93,8 @@ static unsigned int custom_read(unsigned int reg)
     case 0x006: return (unsigned int)(now / 64) & 0xffff;   /* VHPOSR moves */
     case 0x00c: return joy1dat;                    /* JOY1DAT (BT_RANDJOY) */
     case 0x016: return 0xffff;                     /* POTINP: buttons up */
-    case 0x01e: return (irq_pending ? 0x0020 : 0) | (aud_pending ? 0x0080 : 0);   /* INTREQR */
+    case 0x01c: return intena;                     /* INTENAR */
+    case 0x01e: return (irq_pending ? 0x0020 : 0) | aud_pending | (ciab_pending ? 0x2000 : 0);   /* INTREQR */
     default: return 0;
     }
 }
@@ -110,7 +125,7 @@ static void watch_check(unsigned int a, unsigned int v, int size)
         }
     }
     if (a + size > watch_lo && a < watch_hi)
-        printf("WATCH pc %x: %x <- %x (%d)\n", m68k_get_reg(NULL, M68K_REG_PPC) - BASE, a - BASE, v, size);
+        printf("WATCH pc %x: %x <- %x (%d) at %.3f s\n", m68k_get_reg(NULL, M68K_REG_PPC) - BASE, a - BASE, v, size, T() / 14187580.0);
 }
 
 static void bg_check(unsigned int a)
@@ -143,6 +158,13 @@ unsigned int m68k_read_memory_8(unsigned int a)
     waitd(a);
     stale_check(a);
     if (a >= 0xdff000 && a < 0xdff200) return (a & 1) ? custom_read(a) & 0xff : custom_read(a) >> 8;
+    if (a == 0xbfdd00) {                          /* CIA-B ICR: read clears */
+        unsigned int v = ciab_icr ? 0x80 | ciab_icr : 0;
+        ciab_icr = 0;
+        ciab_pending = 0;
+        set_ipl();
+        return v;
+    }
     if (a >= 0xbfd000 && a < 0xbff000) return a == 0xbfe001 && joyfire ? 0x7f : 0xff;
     return rd8(a);
 }
@@ -221,14 +243,36 @@ static void custom_write(unsigned int reg, unsigned int v)
         if (r == 0) aud_lc[c] = (aud_lc[c] & 0xffff) | (v << 16);
         if (r == 2) aud_lc[c] = (aud_lc[c] & 0xffff0000u) | v;
         if (r == 4) aud_len[c] = v;
+        if (r == 6 && aud_run[c]) {             /* (the block goes on from where it is) */
+            unsigned long long t = T(), p0 = aud_per[c] ? aud_per[c] : 1, p1 = v ? v : 1;
+            aud_t0[c] = t - (t - aud_t0[c]) * p1 / p0;
+        }
         if (r == 6) aud_per[c] = v;
         if (r == 8) aud_vol[c] = v;
     }
-    if ((reg & 0x1fe) == 0x096) dmacon = v & 0x8000 ? dmacon | (v & 0x7fff) : dmacon & ~v;
-    if ((reg & 0x1fe) == 0x09a) intena = v & 0x8000 ? intena | (v & 0x7fff) : intena & ~v;
-    if ((reg & 0x1fe) == 0x09c && !(v & 0x8000) && (v & 0x80)) { aud_pending = 0; set_ipl(); }
-    if (!aud_on && (dmacon & 0x201) == 0x201) { aud_on = 1; aud_next = T(); }
-    if (aud_on && (dmacon & 0x201) != 0x201) aud_on = 0;
+    if ((reg & 0x1fe) == 0x096) {
+        unsigned int old = dmacon;
+        dmacon = v & 0x8000 ? dmacon | (v & 0x7fff) : dmacon & ~v;
+        for (int c = 0; c < 4; c++) {
+            int on = (dmacon & 0x200) && (dmacon & (1 << c));
+            if (on && !aud_run[c]) {            /* DMA on: the first block, its interrupt */
+                aud_run[c] = 1;
+                aud_ptr[c] = aud_lc[c];
+                aud_n[c] = (aud_len[c] ? aud_len[c] : 65536) * 2;
+                aud_t0[c] = T();
+                aud_pending |= 0x80 << c;
+            }
+            if (!on) aud_run[c] = 0;
+        }
+        (void)old;
+        set_ipl();
+    }
+    if ((reg & 0x1fe) == 0x09a) { intena = v & 0x8000 ? intena | (v & 0x7fff) : intena & ~v; set_ipl(); }
+    if ((reg & 0x1fe) == 0x09c && !(v & 0x8000)) {
+        aud_pending &= ~(v & 0x780);
+        if (v & 0x2000) ciab_pending = ciab_icr != 0;
+        set_ipl();
+    }
     if ((reg & 0x1fe) == 0x09c && !(v & 0x8000) && (v & 0x20)) {  /* INTREQ clear VERTB */
         irq_pending = 0;
         set_ipl();
@@ -252,6 +296,19 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
     bg_check(a);
     if (watch_hi || !watch_init) watch_check(a, v, 1);
     if (a >= 0xdff000 && a < 0xdff200) return;
+    if (a >= 0xbfd000 && a < 0xbfe000 && !(a & 0xff)) {    /* CIA-B (even addresses) */
+        switch ((a >> 8) & 15) {
+        case 4: ciab_latch = (ciab_latch & 0xff00) | v; break;
+        case 5: ciab_latch = (ciab_latch & 0x00ff) | v << 8;
+                if (!(ciab_cra & 1)) ciab_next = T() + (unsigned long long)ciab_latch * 20;
+                break;
+        case 13: ciab_icr_mask = v & 0x80 ? ciab_icr_mask | (v & 0x7f) : ciab_icr_mask & ~v; break;
+        case 14: if ((v & 1) && !(ciab_cra & 1)) ciab_next = T() + (unsigned long long)(ciab_latch ? ciab_latch : 1) * 20;
+                 if (v & 0x10) ciab_next = T() + (unsigned long long)(ciab_latch ? ciab_latch : 1) * 20;
+                 ciab_cra = v & 0xef; break;
+        }
+        return;
+    }
     if (a >= 0xbfd000 && a < 0xbff000) return;
     mem[a] = v;
 }
@@ -342,7 +399,7 @@ void harness_hook(unsigned int pc)
        with the last 200 PCs (offsets) and registers */
     static unsigned int trap_size = (unsigned int)-1, ring[256], rn;
     if (trap_size == (unsigned int)-1) trap_size = getenv("BT_TRAPOUT") ? (unsigned int)strtoul(getenv("BT_TRAPOUT"), NULL, 16) : 0;
-    if (trap_size && sim_frame > 300) {
+    if (trap_size && started_frame >= 0 && sim_frame > started_frame + (getenv("BT_TRAPFROM") ? atoi(getenv("BT_TRAPFROM")) : 300)) {
         if (pc - BASE >= trap_size) {
             printf("TRAPOUT pc %x (offset %x)\n", pc, pc - BASE);
             for (unsigned int i = rn > 200 ? rn - 200 : 0; i < rn; i++) printf("H %x\n", ring[i & 255]);
@@ -361,6 +418,15 @@ void harness_hook(unsigned int pc)
     if (adf && (pc == EXEC - 198 || pc == EXEC - 456)) adf_call(pc);
     if (adf && getenv("BT_BOOTTRACE") && pc >= BOOTAT && pc < BOOTAT + 0x128) printf("boot pc %x\n", pc - BOOTAT);
     if (pc == BASE && adf) read_header();
+    if (pc == BASE && started_frame < 0) started_frame = sim_frame;
+    if (pc >= 0xfffe00 && pc < 0xffff00) {        /* an exception (the vectors not set: see main) */
+        unsigned int sp = m68k_get_reg(NULL, M68K_REG_SP);
+        printf("EXCEPTION vector %u (frame: sr %04x pc %x, offset %x)\n", (pc - 0xfffe00) / 4, rd16(sp),
+               rd32(sp + 2), rd32(sp + 2) - BASE);
+        for (unsigned int i = rn > 60 ? rn - 60 : 0; i < rn; i++) printf("H %x\n", ring[i & 255]);
+        for (int r = M68K_REG_D0; r <= M68K_REG_A7; r++) printf("R%d %x\n", r, m68k_get_reg(NULL, r));
+        exit(1);
+    }
     if (pc == BASE && adf && !getenv("BT_QUIET_BOOT"))
         printf("boot: the program starts, A2 = $%x, A3 = $%x\n", m68k_get_reg(NULL, M68K_REG_A2), m68k_get_reg(NULL, M68K_REG_A3));
     if (pchist) {
@@ -381,31 +447,49 @@ void harness_hook(unsigned int pc)
         if (mem[indisp_addr]) { disp_cycles += t - hook_last; disp_clock += t - hook_last; }
         hook_last = t;
     }
-    /* audio: a block starts (latching AUDxLC / LEN): the one before it is
-       recorded now, at the volumes it played at (set as it started); interrupt */
-    if (aud_on && T() >= aud_next) {
-        static unsigned int play_lc[4], play_n;
-        if (wav && play_n) {
-            /* BT_WAVSOLO=c: only channel c (to see what each one plays) */
+    /* audio: a channel's block ends: the next from AUDxLC / LEN, its interrupt */
+    {
+        unsigned long long t = T();
+        for (int c = 0; c < 4; c++) {
+            if (!aud_run[c]) continue;
+            unsigned long long per = aud_per[c] ? aud_per[c] : 1, end = aud_t0[c] + aud_n[c] * per * 4;
+            if (t >= end) {
+                aud_t0[c] = end;
+                aud_ptr[c] = aud_lc[c];
+                aud_n[c] = (aud_len[c] ? aud_len[c] : 65536) * 2;
+                aud_pending |= 0x80 << c;
+                set_ipl();
+                if (intena & (0x80 << c)) m68k_end_timeslice();
+            }
+        }
+        /* BT_WAV: what the channels play, sampled at WAV_RATE (BT_WAVSOLO=c:
+           only channel c) */
+        if (wav) {
             static int solo = -2;
             if (solo == -2) solo = getenv("BT_WAVSOLO") ? atoi(getenv("BT_WAVSOLO")) : -1;
-            int vol[4];
-            for (int c = 0; c < 4; c++) vol[c] = solo < 0 || solo == c ? (int)aud_vol[c] : 0;
-            for (unsigned int i = 0; i < play_n; i++) {
-                int l = (signed char)mem[(play_lc[0] + i) & 0xffffff] * vol[0] +
-                        (signed char)mem[(play_lc[3] + i) & 0xffffff] * vol[3];
-                int r = (signed char)mem[(play_lc[1] + i) & 0xffffff] * vol[1] +
-                        (signed char)mem[(play_lc[2] + i) & 0xffffff] * vol[2];
-                short o[2] = { (short)(l * 2), (short)(r * 2) };
-                fwrite(o, 2, 2, wav);
+            while (t >= wav_next) {
+                int o[4];
+                for (int c = 0; c < 4; c++) {
+                    o[c] = 0;
+                    if (!aud_run[c] || (solo >= 0 && solo != c)) continue;
+                    unsigned long long per = aud_per[c] ? aud_per[c] : 1;
+                    unsigned int i = (unsigned int)((wav_next > aud_t0[c] ? wav_next - aud_t0[c] : 0) / (per * 4));
+                    if (i >= aud_n[c]) i = aud_n[c] - 1;
+                    o[c] = (signed char)mem[(aud_ptr[c] + i) & 0xffffff] * (int)(aud_vol[c] > 64 ? 64 : aud_vol[c]);
+                }
+                short w[2] = { (short)((o[0] + o[3]) * 2), (short)((o[1] + o[2]) * 2) };
+                fwrite(w, 2, 2, wav);
+                wav_frames++;
+                wav_next += 14187580ULL / WAV_RATE;
             }
-            wav_frames += play_n;
         }
-        unsigned int n = aud_len[0] * 2;
-        for (int c = 0; c < 4; c++) play_lc[c] = aud_lc[c];
-        play_n = n;
-        aud_next += (unsigned long long)(n ? n : 2) * (aud_per[0] ? aud_per[0] : 256) * 4;
-        if (intena & 0x80) { aud_pending = 1; set_ipl(); m68k_end_timeslice(); }
+        /* CIA-B timer A */
+        if ((ciab_cra & 1) && t >= ciab_next) {
+            ciab_next += (unsigned long long)(ciab_latch ? ciab_latch : 1) * 20;
+            if (ciab_cra & 8) ciab_cra &= ~1;           /* (one-shot) */
+            ciab_icr |= 1;
+            if (ciab_icr_mask & 1) { ciab_pending = 1; set_ipl(); if (intena & 0x2000) m68k_end_timeslice(); }
+        }
     }
     /* the vertical blank arrives at its exact cycle, between any two instructions */
     if (!vbl_due && T() >= next_vbl) {
@@ -464,6 +548,8 @@ void harness_hook(unsigned int pc)
             return;
         }
     }
+    if (pc == rd32(0x70)) n_lev4++;
+    if (pc == rd32(0x78)) n_lev6++;
     if (pc == lev3_addr && !in_irq) { in_irq = 1; lev3_start = T(); }
     if (in_irq && rd16(pc) == 0x4e73) {             /* rte */
         unsigned int sp = m68k_get_reg(NULL, M68K_REG_SP);
@@ -608,6 +694,11 @@ int main(int argc, char **argv)
     m68k_set_reg(M68K_REG_A3, BASE > 0x10000 ? CHIPBLOCK : 0);
     m68k_set_reg(M68K_REG_SR, 0x2000);           /* (the real Supervisor() call gets here) */
     m68k_set_reg(M68K_REG_A2, snd_at);           /* (0: no room for sound) */
+    if (getenv("BT_EXC"))                         /* BT_EXC: unset exception vectors caught */
+        for (unsigned int v = 2; v < 64; v++) {
+            unsigned int t = 0xfffe00 + v * 4;
+            mem[v * 4] = t >> 24; mem[v * 4 + 1] = t >> 16; mem[v * 4 + 2] = t >> 8; mem[v * 4 + 3] = t;
+        }
     m68k_set_reg(M68K_REG_D6, fx_at);
     m68k_set_reg(M68K_REG_D5, 0x100000);         /* (the effects' bytes read: all) */
     if (adf) {                                   /* (as Exec runs a bootblock) */
@@ -730,6 +821,12 @@ int main(int argc, char **argv)
             if (frame % FPS == 0) {
                 static unsigned int last_drawn;
                 unsigned int drawn = getenv("BT_DRAWN") ? rd16(BASE + (unsigned int)strtoul(getenv("BT_DRAWN"), NULL, 16)) : 0;
+                if (getenv("BT_AUDDBG"))
+                    printf("  audio: dmacon %04x intena %04x pending %04x run %d%d%d%d vol %u %u %u %u per %u %u %u %u lc %06x"
+                           " | ciab cra %02x latch %u icr %02x mask %02x pending %d | lev4 %u lev6 %u\n",
+                           dmacon, intena, aud_pending, aud_run[0], aud_run[1], aud_run[2], aud_run[3],
+                           aud_vol[0], aud_vol[1], aud_vol[2], aud_vol[3], aud_per[0], aud_per[1], aud_per[2], aud_per[3],
+                           aud_lc[0], ciab_cra, ciab_latch, ciab_icr, ciab_icr_mask, ciab_pending, n_lev4, n_lev6);
                 printf("second %d: vblank handler %.0f%%, display %.0f%% of the CPU, arcade frames %u, frames drawn %u, PC %06x\n",
                        frame / FPS, 100.0 * in_lev3 / ((double)FPS * FRAME), 100.0 * disp_cycles / ((double)FPS * FRAME), z80_frames,
                        (drawn - last_drawn) & 0xffff, m68k_get_reg(NULL, M68K_REG_PC) - BASE);
@@ -773,7 +870,7 @@ int main(int argc, char **argv)
         }
     }
     if (wav) {                                      /* the WAV header: 16-bit stereo */
-        unsigned int rate = 3546895 / (aud_per[0] ? aud_per[0] : 256), bytes = wav_frames * 4;
+        unsigned int rate = WAV_RATE, bytes = wav_frames * 4;
         unsigned char h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,
                                0,0,0,0,0,0,0,0,4,0,16,0,'d','a','t','a',0,0,0,0};
         unsigned int v[4] = {36 + bytes, rate, rate * 4, bytes};

@@ -7,13 +7,15 @@
 ; form just below. Where the packed data was is zeroed again, as allocated.
 ; Then the payload starts with A6 = ExecBase, A3 = a separate chip RAM block
 ; or 0, A2 = the sound data (its ROM, after a 16K window) or 0, D6 = the
-; effects' samples or 0, D5 = how many of their bytes were read:
+; effects' samples or 0, D5 = how many of their bytes were read, D4 = the
+; music for an A1200 without fast RAM (tools/sound/tracker.py) or 0:
 ;  * fast RAM: the payload, its BSS and the sound data go into fast RAM, the
 ;    display's chip RAM areas into a chip RAM block of their own (A3)
 ;  * otherwise everything goes into one chip RAM block (A3 = 0), with the
-;    effects' samples at its end instead of the sound data; if that won't
-;    fit, without the optional ones at their end (the story tune), else
-;    without any (the game runs silent)
+;    effects' samples at its end instead of the sound data, without the
+;    optional ones at their end (the story tune) and the music after them;
+;    if that won't fit, all the effects and no music; else the effects
+;    without the optional ones; else none (the game runs silent)
 ; Sizes and offsets are patched in by tools/mkadf.py.
 
 	section	boot,code
@@ -40,12 +42,26 @@
 	lea	-$4000(a2),a0		; the payload's packed data below it
 	move.l	a0,d7
 	moveq	#0,d6
-	bra.s	.load
+	bra	.load
 .nochip	move.l	a4,a1			; no room in chip RAM after all: one block
 	move.l	fast_size(pc),d0
 	jsr	-210(a6)		; FreeMem
 .stock	sub.l	a3,a3
-	move.l	stock_size(pc),d0
+	move.l	stock_music(pc),d0	; with the music
+	beq.s	.nomus
+	move.l	#$10002,d1
+	jsr	-198(a6)
+	tst.l	d0
+	beq.s	.nomus
+	move.l	d0,a4
+	lea	fx_load(pc),a0
+	move.l	fx_lite(pc),(a0)
+	add.l	trk_at(pc),d0
+	lea	trk_addr(pc),a0
+	move.l	d0,(a0)
+	move.l	a4,d0
+	bra.s	.st
+.nomus	move.l	stock_size(pc),d0
 	move.l	#$10002,d1
 	jsr	-198(a6)
 	tst.l	d0
@@ -65,7 +81,7 @@
 	tst.l	fx_load(pc)
 	bne.s	.load
 	moveq	#0,d6
-	bra.s	.load
+	bra	.load
 .quiet	sub.l	a2,a2			; without the sound data: silent
 	moveq	#0,d6
 	move.l	stock_quiet(pc),d0
@@ -113,12 +129,19 @@
 	add.l	sound_load(pc),d0
 	move.l	fx_load(pc),d1
 	bsr	read
+	move.l	trk_addr(pc),d0		; the music: read in place
+	beq.s	.mot
+	move.l	d0,a0
+	move.l	trk_off(pc),d0
+	move.l	trk_load(pc),d1
+	bsr	read
 .mot	move.l	a5,a1
 	move.w	#9,28(a1)		; TD_MOTOR
 	clr.l	36(a1)			; off
 	jsr	-456(a6)
 	jsr	-636(a6)		; CacheClearU: the code was written as data
 	move.l	fx_load(pc),d5		; (the effects' bytes read)
+	move.l	trk_addr(pc),d4		; (the music, or 0)
 	jmp	(a4)
 .fail	move.w	#$f00,$dff180
 	bra.s	.fail
@@ -180,3 +203,8 @@ fx_at_stock	dc.l	0		; patched: the effects' place in the one block
 fx_load		dc.l	0		; patched: the effects, rounded to 512 (0: none)
 stock_lite	dc.l	0		; patched: stock_size without the optional effects
 fx_lite		dc.l	0		; patched: fx_load without them
+stock_music	dc.l	0		; patched: stock_lite + the music (0: none)
+trk_at		dc.l	0		; patched: the music's place in the one block
+trk_off		dc.l	0		; patched: its offset on the disk
+trk_load	dc.l	0		; patched: its size, rounded to 512
+trk_addr	dc.l	0		; (where it was read, or 0)

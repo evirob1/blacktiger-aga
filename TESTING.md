@@ -51,7 +51,7 @@ The same disk adapts to the machine it boots on:
 
 | machine | what you get |
 |---|---|
-| A1200, 2 MB chip RAM, no fast RAM | Game at full speed. Sound effects as samples (plus the credit jingle and the story tune); no other music. Busy scenes drop display frames. |
+| A1200, 2 MB chip RAM, no fast RAM | Game at full speed. Music and effects: the tunes as notes on the Amiga's four channels (made from the arcade's music; the effects take a channel while they play). It needs nearly all the chip RAM (1970 KB free at boot): with less, effects only. Busy scenes drop display frames. |
 | A1200 + fast RAM (any 4 MB or more) | Music and effects: the arcade's sound program runs, with its FM instruments played as samples. With an accelerator (68030 or better) the display is smoother too; with a RAM card alone the music takes some of the 68020's time (**F9** turns it off). |
 | 68040 / 68060 + fast RAM | As above, but the two YM2203 sound chips are synthesised in real time: much closer to the arcade. **F10** switches back to the sampled sound if it costs too many frames. |
 | piStorm (Emu68), Vampire, other | Untested: please report! |
@@ -73,7 +73,7 @@ JIT is fine.
 * Joystick in port 2: **fire** = attack, **second button** (or **Space**,
   or **Left Alt**) = jump. The cursor keys and **Ctrl** work too.
 * **5** = insert coin, **1** = one player start, **2** = two players.
-* **F9**: music on/off (fast RAM). **F10**: synthesised / sampled sound
+* **F9**: music on/off. **F10**: synthesised / sampled sound
   (68040/060).
 * **F1–F8** before starting a game: start at that level.
 * **Help**: test mode on/off. You get the strongest weapon, no damage, and

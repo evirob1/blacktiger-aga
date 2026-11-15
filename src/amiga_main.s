@@ -219,6 +219,8 @@ super:
 	move.w	#$2700,sr
 	lea	fx_bank(pc),a0		; d6 (bootblock): the effects as samples, or 0
 	move.l	d6,(a0)
+	lea	trk_bank(pc),a0		; d4: the music without fast RAM, or 0
+	move.l	d4,(a0)
 	lea	fx_read(pc),a0		; d5: their bytes read
 	move.l	d5,(a0)
 	lea	snd_a6(pc),a0		; a2 (bootblock): the sound program's ROM and
@@ -307,7 +309,17 @@ super:
 .fxa
 	move.l	chipb(pc),a0
 	add.l	#CB_AUDIO,a0
-	bsr	fx_init
+	move.l	trk_bank(pc),d0		; with the music (src/trk_play.s): its
+	beq.s	.fxonly			; buffer after it; music on
+	move.l	a0,a2
+	move.l	d0,a0
+	add.l	#(TRK_SIZE+7)&-8,d0
+	move.l	d0,a3
+	bsr	trk_init
+	lea	snd_nomusic(pc),a0
+	sf	(a0)
+	bra.s	.nofx
+.fxonly	bsr	fx_init
 .nofx
 	move.w	#$2000,sr
 	bra	rt_init			; Z80 power on (never returns)
@@ -416,7 +428,9 @@ snd_player:
 .x	movem.l	(sp)+,d0/a0-a1
 	rts
 	include	"fx_bank.i"		; (tools/sound/effects.py)
-	include	"fx_play.s"		; or the effects as samples
+	include	"fx_play.s"		; or the effects as samples,
+	include	"trk_bank.i"		; (tools/sound/tracker.py)
+	include	"trk_play.s"		; with the music as notes
 
 ; d0 = port -> d0.b = value. Keeps every other register. (a6 = Z80 memory)
 plat_in:
@@ -462,7 +476,11 @@ plat_out:
 	move.b	d0,pv_io(a0,d7.w)
 	tst.w	d7
 	bne.s	.n0
-	tst.l	fx_bank(pc)		; port 0: the effects as samples, or a
+	tst.l	trk_bank(pc)		; port 0: the music and the effects as
+	beq.s	.nt			; samples (src/trk_play.s),
+	bsr	trk_command
+	bra.s	.x
+.nt	tst.l	fx_bank(pc)		; the effects as samples, or a
 	beq.s	.snd			; command for the sound board
 	move.w	sr,-(sp)
 	ori.w	#$0700,sr
@@ -1209,6 +1227,13 @@ test_mode:
 	beq.s	.nf9
 	lea	snd_nomusic(pc),a1
 	not.b	(a1)
+	tst.l	trk_bank(pc)		; (without fast RAM: the music's player)
+	beq.s	.nt9
+	move.b	(a1),d0
+	not.b	d0
+	bsr	trk_music
+	bra.s	.nf9
+.nt9	tst.b	(a1)
 	beq.s	.nf9			; on: from the next tune the game starts
 	tst.b	snd_on(pc)		; off: the sound CPU starts again, silent
 	beq.s	.nf9
@@ -3012,6 +3037,7 @@ bss_size:		dc.l	bss_end-bss_start	; (for tools/build_game.py: BSS,
 			dc.l	FX_SIZE			; the effects' samples,
 			dc.l	FX_LITE			; ... without the optional ones)
 fx_bank:		dc.l	0		; the effects' samples (no fast RAM), or 0
+trk_bank:		dc.l	0		; the music as notes (no fast RAM), or 0
 fx_read:		dc.l	0		; ... the bytes of them read
 snd_on:			dc.b	0		; room for sound: it plays
 snd_nomusic:		dc.b	0		; music off (effects only): without fast RAM

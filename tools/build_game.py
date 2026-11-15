@@ -106,6 +106,20 @@ def main():
             "FX_REC\tequ\t14\nFX_PERIOD\tequ\t580\nFX_LITE\tequ\t0\n")
         fx = None
 
+    # the music for an A1200 without fast RAM: the tunes as notes on Paula's
+    # channels (tools/sound/tracker.py, from the sound program's output)
+    trk = os.path.join(out, "trk_bank.bin")
+    try:
+        if fx is None:
+            raise OSError("no effects")
+        subprocess.run(toolpaths.python(os.path.join(HERE, "sound", "tracker.py")) + [trk,
+                        os.path.join(out, "trk_bank.i")], check=True)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print("sound: the music without fast RAM could not be made (%s): effects only there" % e)
+        open(os.path.join(out, "trk_bank.i"), "w").write(
+            "TRK_SIZE\tequ\t0\nTRK_BUF\tequ\t0\nTRK_TICK\tequ\t2839\nTRK_TICKDIV\tequ\t7098\n")
+        trk = None
+
     boot = os.path.join(ROOT, "build", "boot.bin")
     build.assemble(os.path.join(ROOT, "src", "boot.s"), boot)
     payload = os.path.join(out, "game.bin")
@@ -116,8 +130,14 @@ def main():
     data = open(payload, "rb").read()
     bss, chipa, chipb, sound_size, fx_size, fx_lite = (int.from_bytes(data[at + 4 * i:at + 4 * i + 4], "big")
                                                        for i in range(6))
+    trk_buf = 0
+    if trk:
+        for line in open(os.path.join(out, "trk_bank.i")):
+            f = line.split()
+            if f[:2] == ["TRK_BUF", "equ"]:
+                trk_buf = int(f[2])
     mkadf.build(boot, payload, bss, os.path.join(ROOT, "build", "blacktiger.adf"), chipa, chipb,
-                sound, sound_size, listing_symbol(lst, "bss_end"), fx, fx_size, fx_lite)
+                sound, sound_size, listing_symbol(lst, "bss_end"), fx, fx_size, fx_lite, trk, trk_buf)
 
 
 if __name__ == "__main__":
